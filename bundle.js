@@ -1776,10 +1776,16 @@ module.exports = function() {
 
 var number = require('./number');
 
+// The `integer` type is just a wrapper for the `number` type. The `number` type
+// returns floating point numbers, and `integer` type truncates the fraction
+// part, leaving the result as an integer.
+//
 module.exports = function(value) {
   value.hasPrecision = false;
-
-  return Math.floor(number(value));
+  var generated = number(value);
+  // whether the generated number is positive or negative, need to use either
+  // floor (positive) or ceil (negative) function to get rid of the fraction
+  return generated > 0 ? Math.floor(generated) : Math.ceil(generated);
 };
 
 },{"./number":10}],9:[function(require,module,exports){
@@ -2134,17 +2140,26 @@ var inferredProperties = {
   ]
 };
 
+var subschemaProperties = [
+  'additionalItems', 'items', 'additionalProperties', 'dependencies', 'patternProperties', 'properties'
+];
+
 inferredProperties.number = inferredProperties.integer;
 
-function mayHaveType(obj, props) {
+function mayHaveType(obj, path, props) {
   return Object.keys(obj).filter(function(prop) {
-    return props.indexOf(prop) > -1;
+    // Do not attempt to infer properties named as subschema containers.  The reason for this is
+    // that any property name within those containers that matches one of the properties used for inferring missing type
+    // values causes the container itself to get processed which leads to invalid output.  (Issue 62)
+    if (props.indexOf(prop) > -1 && subschemaProperties.indexOf(path[path.length - 1]) === -1) {
+      return true;
+    }
   }).length > 0;
 }
 
-module.exports = function(obj) {
+module.exports = function(obj, path) {
   for (var type in inferredProperties) {
-    if (mayHaveType(obj, inferredProperties[type])) {
+    if (mayHaveType(obj, path, inferredProperties[type])) {
       return type;
     }
   }
@@ -2231,6 +2246,8 @@ var ParseError = require('./error');
 
 var inferredType = require('./inferred');
 
+var primitives = null;
+
 function reduce(obj) {
   var mix = obj.allOf || obj.anyOf || obj.oneOf;
 
@@ -2268,7 +2285,9 @@ function reduce(obj) {
 }
 
 function traverse(obj, path) {
-  var primitives = require('./primitives');
+  if (primitives === null) {
+    primitives = require('./primitives');
+  }
 
   var copy = {};
 
@@ -2290,7 +2309,7 @@ function traverse(obj, path) {
     type = random.pick(type);
   } else if (typeof type === 'undefined') {
     // Attempt to infer the type
-    type = inferredType(obj) || type;
+    type = inferredType(obj, path) || type;
   }
 
   if (typeof type === 'string') {
@@ -2326,7 +2345,7 @@ module.exports = traverse;
 
 },{"./combine":13,"./error":15,"./inferred":18,"./primitives":19,"./random":20}],22:[function(require,module,exports){
 (function (Buffer){
-//  Chance.js 0.7.6
+//  Chance.js 0.7.7
 //  http://chancejs.com
 //  (c) 2013 Victor Quinn
 //  Chance may be freely distributed or modified under the MIT license.
@@ -2386,7 +2405,7 @@ module.exports = traverse;
         return this;
     }
 
-    Chance.prototype.VERSION = "0.7.6";
+    Chance.prototype.VERSION = "0.7.7";
 
     // Random helper functions
     function initOptions(options, defaults) {
@@ -2790,12 +2809,23 @@ module.exports = traverse;
         options = initOptions(options);
 
         var words = options.words || this.natural({min: 12, max: 18}),
+            punctuation = options.punctuation,
             text, word_array = this.n(this.word, words);
 
         text = word_array.join(' ');
-
-        // Capitalize first letter of sentence, add period at end
-        text = this.capitalize(text) + '.';
+        
+        // Capitalize first letter of sentence
+        text = this.capitalize(text);
+        
+        // Make sure punctuation has a usable value
+        if (punctuation !== false && !/^[\.\?;!:]$/.test(punctuation)) {
+            punctuation = '.';
+        }
+        
+        // Add punctuation mark
+        if (punctuation) {
+            text += punctuation;
+        }
 
         return text;
     };
@@ -2923,6 +2953,19 @@ module.exports = traverse;
 
     Chance.prototype.last = function () {
         return this.pick(this.get("lastNames"));
+    };
+    
+    Chance.prototype.israelId=function(){
+        var x=this.string({pool: '0123456789',length:8});
+        var y=0;
+        for (var i=0;i<x.length;i++){
+            var thisDigit=  x[i] *  (i/2===parseInt(i/2) ? 1 : 2);
+            thisDigit=this.pad(thisDigit,2).toString();
+            thisDigit=parseInt(thisDigit[0]) + parseInt(thisDigit[1]);
+            y=y+thisDigit;
+        }
+        x=x+(10-parseInt(y.toString().slice(-1))).toString().slice(-1);
+        return x;
     };
 
     Chance.prototype.mrz = function (options) {
@@ -3377,7 +3420,7 @@ module.exports = traverse;
     };
 
     Chance.prototype.depth = function (options) {
-        options = initOptions(options, {fixed: 5, min: -2550, max: 0});
+        options = initOptions(options, {fixed: 5, min: -10994, max: 0});
         return this.floating({
             min: options.min,
             max: options.max,
@@ -3508,15 +3551,18 @@ module.exports = traverse;
     };
 
     Chance.prototype.states = function (options) {
-        options = initOptions(options);
+        options = initOptions(options, { us_states_and_dc: true });
 
         var states,
             us_states_and_dc = this.get("us_states_and_dc"),
             territories = this.get("territories"),
             armed_forces = this.get("armed_forces");
 
-        states = us_states_and_dc;
+        states = [];
 
+        if (options.us_states_and_dc) {
+            states = states.concat(us_states_and_dc);
+        }
         if (options.territories) {
             states = states.concat(territories);
         }
@@ -3824,6 +3870,55 @@ module.exports = traverse;
     };
 
     // -- End Finance
+
+    // -- Regional
+
+    Chance.prototype.pl_pesel = function () {
+        var number = this.natural({min: 1, max: 9999999999});
+        var arr = this.pad(number, 10).split('');
+        for (var i = 0; i < arr.length; i++) {
+            arr[i] = parseInt(arr[i]);
+        }
+
+        var controlNumber = (1 * arr[0] + 3 * arr[1] + 7 * arr[2] + 9 * arr[3] + 1 * arr[4] + 3 * arr[5] + 7 * arr[6] + 9 * arr[7] + 1 * arr[8] + 3 * arr[9]) % 10;
+        if(controlNumber !== 0) {
+            controlNumber = 10 - controlNumber;
+        }
+
+        return arr.join('') + controlNumber;
+    };
+
+    Chance.prototype.pl_nip = function () {
+        var number = this.natural({min: 1, max: 999999999});
+        var arr = this.pad(number, 9).split('');
+        for (var i = 0; i < arr.length; i++) {
+            arr[i] = parseInt(arr[i]);
+        }
+
+        var controlNumber = (6 * arr[0] + 5 * arr[1] + 7 * arr[2] + 2 * arr[3] + 3 * arr[4] + 4 * arr[5] + 5 * arr[6] + 6 * arr[7] + 7 * arr[8]) % 11;
+        if(controlNumber === 10) {
+            return this.pl_nip();
+        }
+
+        return arr.join('') + controlNumber;
+    };
+
+    Chance.prototype.pl_regon = function () {
+        var number = this.natural({min: 1, max: 99999999});
+        var arr = this.pad(number, 8).split('');
+        for (var i = 0; i < arr.length; i++) {
+            arr[i] = parseInt(arr[i]);
+        }
+
+        var controlNumber = (8 * arr[0] + 9 * arr[1] + 2 * arr[2] + 3 * arr[3] + 4 * arr[4] + 5 * arr[5] + 6 * arr[6] + 7 * arr[7]) % 11;
+        if(controlNumber === 10) {
+            controlNumber = 0;
+        }
+
+        return arr.join('') + controlNumber;
+    };
+
+    // -- End Regional
 
     // -- Miscellaneous --
 
