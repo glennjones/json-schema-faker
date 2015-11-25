@@ -45864,7 +45864,7 @@ function generate(schema, refs, ex) {
 
         max--;
 
-        merge(sub, $.util.findByRef(id, $.refs));
+        merge(sub, reduce($.util.findByRef(id, $.refs)));
       }
 
       if (sub.allOf) {
@@ -45883,7 +45883,7 @@ function generate(schema, refs, ex) {
         delete sub.anyOf;
         delete sub.oneOf;
 
-        merge(sub, random.pick(mix));
+        merge(sub, reduce(random.pick(mix)));
       }
 
       for (var prop in sub) {
