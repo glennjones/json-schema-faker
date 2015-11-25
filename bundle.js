@@ -1,2349 +1,514 @@
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
-/*!
- * The buffer module from node.js, for the browser.
- *
- * @author   Feross Aboukhadijeh <feross@feross.org> <http://feross.org>
- * @license  MIT
- */
+'use strict';
 
-var base64 = require('base64-js')
-var ieee754 = require('ieee754')
-var isArray = require('is-array')
+var $ = require('./util/uri-helpers');
 
-exports.Buffer = Buffer
-exports.SlowBuffer = SlowBuffer
-exports.INSPECT_MAX_BYTES = 50
-Buffer.poolSize = 8192 // not used by this implementation
+$.findByRef = require('./util/find-reference');
+$.resolveSchema = require('./util/resolve-schema');
+$.normalizeSchema = require('./util/normalize-schema');
 
-var kMaxLength = 0x3fffffff
-var rootParent = {}
-
-/**
- * If `Buffer.TYPED_ARRAY_SUPPORT`:
- *   === true    Use Uint8Array implementation (fastest)
- *   === false   Use Object implementation (most compatible, even IE6)
- *
- * Browsers that support typed arrays are IE 10+, Firefox 4+, Chrome 7+, Safari 5.1+,
- * Opera 11.6+, iOS 4.2+.
- *
- * Note:
- *
- * - Implementation must support adding new properties to `Uint8Array` instances.
- *   Firefox 4-29 lacked support, fixed in Firefox 30+.
- *   See: https://bugzilla.mozilla.org/show_bug.cgi?id=695438.
- *
- *  - Chrome 9-10 is missing the `TypedArray.prototype.subarray` function.
- *
- *  - IE10 has a broken `TypedArray.prototype.subarray` function which returns arrays of
- *    incorrect length in some situations.
- *
- * We detect these buggy browsers and set `Buffer.TYPED_ARRAY_SUPPORT` to `false` so they will
- * get the Object implementation, which is slower but will work correctly.
- */
-Buffer.TYPED_ARRAY_SUPPORT = (function () {
-  try {
-    var buf = new ArrayBuffer(0)
-    var arr = new Uint8Array(buf)
-    arr.foo = function () { return 42 }
-    return arr.foo() === 42 && // typed array instances can be augmented
-        typeof arr.subarray === 'function' && // chrome 9-10 lack `subarray`
-        new Uint8Array(1).subarray(1, 1).byteLength === 0 // ie10 has broken `subarray`
-  } catch (e) {
-    return false
-  }
-})()
-
-/**
- * Class: Buffer
- * =============
- *
- * The Buffer constructor returns instances of `Uint8Array` that are augmented
- * with function properties for all the node `Buffer` API functions. We use
- * `Uint8Array` so that square bracket notation works as expected -- it returns
- * a single octet.
- *
- * By augmenting the instances, we can avoid modifying the `Uint8Array`
- * prototype.
- */
-function Buffer (arg) {
-  if (!(this instanceof Buffer)) {
-    // Avoid going through an ArgumentsAdaptorTrampoline in the common case.
-    if (arguments.length > 1) return new Buffer(arg, arguments[1])
-    return new Buffer(arg)
-  }
-
-  this.length = 0
-  this.parent = undefined
-
-  // Common case.
-  if (typeof arg === 'number') {
-    return fromNumber(this, arg)
-  }
-
-  // Slightly less common case.
-  if (typeof arg === 'string') {
-    return fromString(this, arg, arguments.length > 1 ? arguments[1] : 'utf8')
-  }
-
-  // Unusual.
-  return fromObject(this, arg)
-}
-
-function fromNumber (that, length) {
-  that = allocate(that, length < 0 ? 0 : checked(length) | 0)
-  if (!Buffer.TYPED_ARRAY_SUPPORT) {
-    for (var i = 0; i < length; i++) {
-      that[i] = 0
+var instance = module.exports = function() {
+  function $ref(fakeroot, schema, refs, ex) {
+    if (typeof fakeroot === 'object') {
+      ex = refs;
+      refs = schema;
+      schema = fakeroot;
+      fakeroot = undefined;
     }
-  }
-  return that
-}
 
-function fromString (that, string, encoding) {
-  if (typeof encoding !== 'string' || encoding === '') encoding = 'utf8'
-
-  // Assumption: byteLength() return value is always < kMaxLength.
-  var length = byteLength(string, encoding) | 0
-  that = allocate(that, length)
-
-  that.write(string, encoding)
-  return that
-}
-
-function fromObject (that, object) {
-  if (Buffer.isBuffer(object)) return fromBuffer(that, object)
-
-  if (isArray(object)) return fromArray(that, object)
-
-  if (object == null) {
-    throw new TypeError('must start with number, buffer, array or string')
-  }
-
-  if (typeof ArrayBuffer !== 'undefined' && object.buffer instanceof ArrayBuffer) {
-    return fromTypedArray(that, object)
-  }
-
-  if (object.length) return fromArrayLike(that, object)
-
-  return fromJsonObject(that, object)
-}
-
-function fromBuffer (that, buffer) {
-  var length = checked(buffer.length) | 0
-  that = allocate(that, length)
-  buffer.copy(that, 0, 0, length)
-  return that
-}
-
-function fromArray (that, array) {
-  var length = checked(array.length) | 0
-  that = allocate(that, length)
-  for (var i = 0; i < length; i += 1) {
-    that[i] = array[i] & 255
-  }
-  return that
-}
-
-// Duplicate of fromArray() to keep fromArray() monomorphic.
-function fromTypedArray (that, array) {
-  var length = checked(array.length) | 0
-  that = allocate(that, length)
-  // Truncating the elements is probably not what people expect from typed
-  // arrays with BYTES_PER_ELEMENT > 1 but it's compatible with the behavior
-  // of the old Buffer constructor.
-  for (var i = 0; i < length; i += 1) {
-    that[i] = array[i] & 255
-  }
-  return that
-}
-
-function fromArrayLike (that, array) {
-  var length = checked(array.length) | 0
-  that = allocate(that, length)
-  for (var i = 0; i < length; i += 1) {
-    that[i] = array[i] & 255
-  }
-  return that
-}
-
-// Deserialize { type: 'Buffer', data: [1,2,3,...] } into a Buffer object.
-// Returns a zero-length buffer for inputs that don't conform to the spec.
-function fromJsonObject (that, object) {
-  var array
-  var length = 0
-
-  if (object.type === 'Buffer' && isArray(object.data)) {
-    array = object.data
-    length = checked(array.length) | 0
-  }
-  that = allocate(that, length)
-
-  for (var i = 0; i < length; i += 1) {
-    that[i] = array[i] & 255
-  }
-  return that
-}
-
-function allocate (that, length) {
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    // Return an augmented `Uint8Array` instance, for best performance
-    that = Buffer._augment(new Uint8Array(length))
-  } else {
-    // Fallback: Return an object instance of the Buffer class
-    that.length = length
-    that._isBuffer = true
-  }
-
-  var fromPool = length !== 0 && length <= Buffer.poolSize >>> 1
-  if (fromPool) that.parent = rootParent
-
-  return that
-}
-
-function checked (length) {
-  // Note: cannot use `length < kMaxLength` here because that fails when
-  // length is NaN (which is otherwise coerced to zero.)
-  if (length >= kMaxLength) {
-    throw new RangeError('Attempt to allocate Buffer larger than maximum ' +
-                         'size: 0x' + kMaxLength.toString(16) + ' bytes')
-  }
-  return length | 0
-}
-
-function SlowBuffer (subject, encoding) {
-  if (!(this instanceof SlowBuffer)) return new SlowBuffer(subject, encoding)
-
-  var buf = new Buffer(subject, encoding)
-  delete buf.parent
-  return buf
-}
-
-Buffer.isBuffer = function isBuffer (b) {
-  return !!(b != null && b._isBuffer)
-}
-
-Buffer.compare = function compare (a, b) {
-  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
-    throw new TypeError('Arguments must be Buffers')
-  }
-
-  if (a === b) return 0
-
-  var x = a.length
-  var y = b.length
-
-  var i = 0
-  var len = Math.min(x, y)
-  while (i < len) {
-    if (a[i] !== b[i]) break
-
-    ++i
-  }
-
-  if (i !== len) {
-    x = a[i]
-    y = b[i]
-  }
-
-  if (x < y) return -1
-  if (y < x) return 1
-  return 0
-}
-
-Buffer.isEncoding = function isEncoding (encoding) {
-  switch (String(encoding).toLowerCase()) {
-    case 'hex':
-    case 'utf8':
-    case 'utf-8':
-    case 'ascii':
-    case 'binary':
-    case 'base64':
-    case 'raw':
-    case 'ucs2':
-    case 'ucs-2':
-    case 'utf16le':
-    case 'utf-16le':
-      return true
-    default:
-      return false
-  }
-}
-
-Buffer.concat = function concat (list, length) {
-  if (!isArray(list)) throw new TypeError('list argument must be an Array of Buffers.')
-
-  if (list.length === 0) {
-    return new Buffer(0)
-  } else if (list.length === 1) {
-    return list[0]
-  }
-
-  var i
-  if (length === undefined) {
-    length = 0
-    for (i = 0; i < list.length; i++) {
-      length += list[i].length
+    if (typeof schema !== 'object') {
+      throw new Error('schema must be an object');
     }
-  }
 
-  var buf = new Buffer(length)
-  var pos = 0
-  for (i = 0; i < list.length; i++) {
-    var item = list[i]
-    item.copy(buf, pos)
-    pos += item.length
-  }
-  return buf
-}
-
-function byteLength (string, encoding) {
-  if (typeof string !== 'string') string = String(string)
-
-  if (string.length === 0) return 0
-
-  switch (encoding || 'utf8') {
-    case 'ascii':
-    case 'binary':
-    case 'raw':
-      return string.length
-    case 'ucs2':
-    case 'ucs-2':
-    case 'utf16le':
-    case 'utf-16le':
-      return string.length * 2
-    case 'hex':
-      return string.length >>> 1
-    case 'utf8':
-    case 'utf-8':
-      return utf8ToBytes(string).length
-    case 'base64':
-      return base64ToBytes(string).length
-    default:
-      return string.length
-  }
-}
-Buffer.byteLength = byteLength
-
-// pre-set for values that may exist in the future
-Buffer.prototype.length = undefined
-Buffer.prototype.parent = undefined
-
-// toString(encoding, start=0, end=buffer.length)
-Buffer.prototype.toString = function toString (encoding, start, end) {
-  var loweredCase = false
-
-  start = start | 0
-  end = end === undefined || end === Infinity ? this.length : end | 0
-
-  if (!encoding) encoding = 'utf8'
-  if (start < 0) start = 0
-  if (end > this.length) end = this.length
-  if (end <= start) return ''
-
-  while (true) {
-    switch (encoding) {
-      case 'hex':
-        return hexSlice(this, start, end)
-
-      case 'utf8':
-      case 'utf-8':
-        return utf8Slice(this, start, end)
-
-      case 'ascii':
-        return asciiSlice(this, start, end)
-
-      case 'binary':
-        return binarySlice(this, start, end)
-
-      case 'base64':
-        return base64Slice(this, start, end)
-
-      case 'ucs2':
-      case 'ucs-2':
-      case 'utf16le':
-      case 'utf-16le':
-        return utf16leSlice(this, start, end)
-
-      default:
-        if (loweredCase) throw new TypeError('Unknown encoding: ' + encoding)
-        encoding = (encoding + '').toLowerCase()
-        loweredCase = true
+    if (typeof refs !== 'undefined' && !Array.isArray(refs)) {
+      ex = !!refs;
+      refs = [];
     }
-  }
-}
 
-Buffer.prototype.equals = function equals (b) {
-  if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
-  if (this === b) return true
-  return Buffer.compare(this, b) === 0
-}
-
-Buffer.prototype.inspect = function inspect () {
-  var str = ''
-  var max = exports.INSPECT_MAX_BYTES
-  if (this.length > 0) {
-    str = this.toString('hex', 0, max).match(/.{2}/g).join(' ')
-    if (this.length > max) str += ' ... '
-  }
-  return '<Buffer ' + str + '>'
-}
-
-Buffer.prototype.compare = function compare (b) {
-  if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
-  if (this === b) return 0
-  return Buffer.compare(this, b)
-}
-
-Buffer.prototype.indexOf = function indexOf (val, byteOffset) {
-  if (byteOffset > 0x7fffffff) byteOffset = 0x7fffffff
-  else if (byteOffset < -0x80000000) byteOffset = -0x80000000
-  byteOffset >>= 0
-
-  if (this.length === 0) return -1
-  if (byteOffset >= this.length) return -1
-
-  // Negative offsets start from the end of the buffer
-  if (byteOffset < 0) byteOffset = Math.max(this.length + byteOffset, 0)
-
-  if (typeof val === 'string') {
-    if (val.length === 0) return -1 // special case: looking for empty string always fails
-    return String.prototype.indexOf.call(this, val, byteOffset)
-  }
-  if (Buffer.isBuffer(val)) {
-    return arrayIndexOf(this, val, byteOffset)
-  }
-  if (typeof val === 'number') {
-    if (Buffer.TYPED_ARRAY_SUPPORT && Uint8Array.prototype.indexOf === 'function') {
-      return Uint8Array.prototype.indexOf.call(this, val, byteOffset)
-    }
-    return arrayIndexOf(this, [ val ], byteOffset)
-  }
-
-  function arrayIndexOf (arr, val, byteOffset) {
-    var foundIndex = -1
-    for (var i = 0; byteOffset + i < arr.length; i++) {
-      if (arr[byteOffset + i] === val[foundIndex === -1 ? 0 : i - foundIndex]) {
-        if (foundIndex === -1) foundIndex = i
-        if (i - foundIndex + 1 === val.length) return byteOffset + foundIndex
-      } else {
-        foundIndex = -1
-      }
-    }
-    return -1
-  }
-
-  throw new TypeError('val must be string, number or Buffer')
-}
-
-// `get` will be removed in Node 0.13+
-Buffer.prototype.get = function get (offset) {
-  console.log('.get() is deprecated. Access using array indexes instead.')
-  return this.readUInt8(offset)
-}
-
-// `set` will be removed in Node 0.13+
-Buffer.prototype.set = function set (v, offset) {
-  console.log('.set() is deprecated. Access using array indexes instead.')
-  return this.writeUInt8(v, offset)
-}
-
-function hexWrite (buf, string, offset, length) {
-  offset = Number(offset) || 0
-  var remaining = buf.length - offset
-  if (!length) {
-    length = remaining
-  } else {
-    length = Number(length)
-    if (length > remaining) {
-      length = remaining
-    }
-  }
-
-  // must be an even number of digits
-  var strLen = string.length
-  if (strLen % 2 !== 0) throw new Error('Invalid hex string')
-
-  if (length > strLen / 2) {
-    length = strLen / 2
-  }
-  for (var i = 0; i < length; i++) {
-    var parsed = parseInt(string.substr(i * 2, 2), 16)
-    if (isNaN(parsed)) throw new Error('Invalid hex string')
-    buf[offset + i] = parsed
-  }
-  return i
-}
-
-function utf8Write (buf, string, offset, length) {
-  return blitBuffer(utf8ToBytes(string, buf.length - offset), buf, offset, length)
-}
-
-function asciiWrite (buf, string, offset, length) {
-  return blitBuffer(asciiToBytes(string), buf, offset, length)
-}
-
-function binaryWrite (buf, string, offset, length) {
-  return asciiWrite(buf, string, offset, length)
-}
-
-function base64Write (buf, string, offset, length) {
-  return blitBuffer(base64ToBytes(string), buf, offset, length)
-}
-
-function ucs2Write (buf, string, offset, length) {
-  return blitBuffer(utf16leToBytes(string, buf.length - offset), buf, offset, length)
-}
-
-Buffer.prototype.write = function write (string, offset, length, encoding) {
-  // Buffer#write(string)
-  if (offset === undefined) {
-    encoding = 'utf8'
-    length = this.length
-    offset = 0
-  // Buffer#write(string, encoding)
-  } else if (length === undefined && typeof offset === 'string') {
-    encoding = offset
-    length = this.length
-    offset = 0
-  // Buffer#write(string, offset[, length][, encoding])
-  } else if (isFinite(offset)) {
-    offset = offset | 0
-    if (isFinite(length)) {
-      length = length | 0
-      if (encoding === undefined) encoding = 'utf8'
-    } else {
-      encoding = length
-      length = undefined
-    }
-  // legacy write(string, encoding, offset, length) - remove in v0.13
-  } else {
-    var swap = encoding
-    encoding = offset
-    offset = length | 0
-    length = swap
-  }
-
-  var remaining = this.length - offset
-  if (length === undefined || length > remaining) length = remaining
-
-  if ((string.length > 0 && (length < 0 || offset < 0)) || offset > this.length) {
-    throw new RangeError('attempt to write outside buffer bounds')
-  }
-
-  if (!encoding) encoding = 'utf8'
-
-  var loweredCase = false
-  for (;;) {
-    switch (encoding) {
-      case 'hex':
-        return hexWrite(this, string, offset, length)
-
-      case 'utf8':
-      case 'utf-8':
-        return utf8Write(this, string, offset, length)
-
-      case 'ascii':
-        return asciiWrite(this, string, offset, length)
-
-      case 'binary':
-        return binaryWrite(this, string, offset, length)
-
-      case 'base64':
-        // Warning: maxLength not taken into account in base64Write
-        return base64Write(this, string, offset, length)
-
-      case 'ucs2':
-      case 'ucs-2':
-      case 'utf16le':
-      case 'utf-16le':
-        return ucs2Write(this, string, offset, length)
-
-      default:
-        if (loweredCase) throw new TypeError('Unknown encoding: ' + encoding)
-        encoding = ('' + encoding).toLowerCase()
-        loweredCase = true
-    }
-  }
-}
-
-Buffer.prototype.toJSON = function toJSON () {
-  return {
-    type: 'Buffer',
-    data: Array.prototype.slice.call(this._arr || this, 0)
-  }
-}
-
-function base64Slice (buf, start, end) {
-  if (start === 0 && end === buf.length) {
-    return base64.fromByteArray(buf)
-  } else {
-    return base64.fromByteArray(buf.slice(start, end))
-  }
-}
-
-function utf8Slice (buf, start, end) {
-  var res = ''
-  var tmp = ''
-  end = Math.min(buf.length, end)
-
-  for (var i = start; i < end; i++) {
-    if (buf[i] <= 0x7F) {
-      res += decodeUtf8Char(tmp) + String.fromCharCode(buf[i])
-      tmp = ''
-    } else {
-      tmp += '%' + buf[i].toString(16)
-    }
-  }
-
-  return res + decodeUtf8Char(tmp)
-}
-
-function asciiSlice (buf, start, end) {
-  var ret = ''
-  end = Math.min(buf.length, end)
-
-  for (var i = start; i < end; i++) {
-    ret += String.fromCharCode(buf[i] & 0x7F)
-  }
-  return ret
-}
-
-function binarySlice (buf, start, end) {
-  var ret = ''
-  end = Math.min(buf.length, end)
-
-  for (var i = start; i < end; i++) {
-    ret += String.fromCharCode(buf[i])
-  }
-  return ret
-}
-
-function hexSlice (buf, start, end) {
-  var len = buf.length
-
-  if (!start || start < 0) start = 0
-  if (!end || end < 0 || end > len) end = len
-
-  var out = ''
-  for (var i = start; i < end; i++) {
-    out += toHex(buf[i])
-  }
-  return out
-}
-
-function utf16leSlice (buf, start, end) {
-  var bytes = buf.slice(start, end)
-  var res = ''
-  for (var i = 0; i < bytes.length; i += 2) {
-    res += String.fromCharCode(bytes[i] + bytes[i + 1] * 256)
-  }
-  return res
-}
-
-Buffer.prototype.slice = function slice (start, end) {
-  var len = this.length
-  start = ~~start
-  end = end === undefined ? len : ~~end
-
-  if (start < 0) {
-    start += len
-    if (start < 0) start = 0
-  } else if (start > len) {
-    start = len
-  }
-
-  if (end < 0) {
-    end += len
-    if (end < 0) end = 0
-  } else if (end > len) {
-    end = len
-  }
-
-  if (end < start) end = start
-
-  var newBuf
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    newBuf = Buffer._augment(this.subarray(start, end))
-  } else {
-    var sliceLen = end - start
-    newBuf = new Buffer(sliceLen, undefined)
-    for (var i = 0; i < sliceLen; i++) {
-      newBuf[i] = this[i + start]
-    }
-  }
-
-  if (newBuf.length) newBuf.parent = this.parent || this
-
-  return newBuf
-}
-
-/*
- * Need to make sure that buffer isn't trying to write out of bounds.
- */
-function checkOffset (offset, ext, length) {
-  if ((offset % 1) !== 0 || offset < 0) throw new RangeError('offset is not uint')
-  if (offset + ext > length) throw new RangeError('Trying to access beyond buffer length')
-}
-
-Buffer.prototype.readUIntLE = function readUIntLE (offset, byteLength, noAssert) {
-  offset = offset | 0
-  byteLength = byteLength | 0
-  if (!noAssert) checkOffset(offset, byteLength, this.length)
-
-  var val = this[offset]
-  var mul = 1
-  var i = 0
-  while (++i < byteLength && (mul *= 0x100)) {
-    val += this[offset + i] * mul
-  }
-
-  return val
-}
-
-Buffer.prototype.readUIntBE = function readUIntBE (offset, byteLength, noAssert) {
-  offset = offset | 0
-  byteLength = byteLength | 0
-  if (!noAssert) {
-    checkOffset(offset, byteLength, this.length)
-  }
-
-  var val = this[offset + --byteLength]
-  var mul = 1
-  while (byteLength > 0 && (mul *= 0x100)) {
-    val += this[offset + --byteLength] * mul
-  }
-
-  return val
-}
-
-Buffer.prototype.readUInt8 = function readUInt8 (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 1, this.length)
-  return this[offset]
-}
-
-Buffer.prototype.readUInt16LE = function readUInt16LE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 2, this.length)
-  return this[offset] | (this[offset + 1] << 8)
-}
-
-Buffer.prototype.readUInt16BE = function readUInt16BE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 2, this.length)
-  return (this[offset] << 8) | this[offset + 1]
-}
-
-Buffer.prototype.readUInt32LE = function readUInt32LE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 4, this.length)
-
-  return ((this[offset]) |
-      (this[offset + 1] << 8) |
-      (this[offset + 2] << 16)) +
-      (this[offset + 3] * 0x1000000)
-}
-
-Buffer.prototype.readUInt32BE = function readUInt32BE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 4, this.length)
-
-  return (this[offset] * 0x1000000) +
-    ((this[offset + 1] << 16) |
-    (this[offset + 2] << 8) |
-    this[offset + 3])
-}
-
-Buffer.prototype.readIntLE = function readIntLE (offset, byteLength, noAssert) {
-  offset = offset | 0
-  byteLength = byteLength | 0
-  if (!noAssert) checkOffset(offset, byteLength, this.length)
-
-  var val = this[offset]
-  var mul = 1
-  var i = 0
-  while (++i < byteLength && (mul *= 0x100)) {
-    val += this[offset + i] * mul
-  }
-  mul *= 0x80
-
-  if (val >= mul) val -= Math.pow(2, 8 * byteLength)
-
-  return val
-}
-
-Buffer.prototype.readIntBE = function readIntBE (offset, byteLength, noAssert) {
-  offset = offset | 0
-  byteLength = byteLength | 0
-  if (!noAssert) checkOffset(offset, byteLength, this.length)
-
-  var i = byteLength
-  var mul = 1
-  var val = this[offset + --i]
-  while (i > 0 && (mul *= 0x100)) {
-    val += this[offset + --i] * mul
-  }
-  mul *= 0x80
-
-  if (val >= mul) val -= Math.pow(2, 8 * byteLength)
-
-  return val
-}
-
-Buffer.prototype.readInt8 = function readInt8 (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 1, this.length)
-  if (!(this[offset] & 0x80)) return (this[offset])
-  return ((0xff - this[offset] + 1) * -1)
-}
-
-Buffer.prototype.readInt16LE = function readInt16LE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 2, this.length)
-  var val = this[offset] | (this[offset + 1] << 8)
-  return (val & 0x8000) ? val | 0xFFFF0000 : val
-}
-
-Buffer.prototype.readInt16BE = function readInt16BE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 2, this.length)
-  var val = this[offset + 1] | (this[offset] << 8)
-  return (val & 0x8000) ? val | 0xFFFF0000 : val
-}
-
-Buffer.prototype.readInt32LE = function readInt32LE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 4, this.length)
-
-  return (this[offset]) |
-    (this[offset + 1] << 8) |
-    (this[offset + 2] << 16) |
-    (this[offset + 3] << 24)
-}
-
-Buffer.prototype.readInt32BE = function readInt32BE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 4, this.length)
-
-  return (this[offset] << 24) |
-    (this[offset + 1] << 16) |
-    (this[offset + 2] << 8) |
-    (this[offset + 3])
-}
-
-Buffer.prototype.readFloatLE = function readFloatLE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 4, this.length)
-  return ieee754.read(this, offset, true, 23, 4)
-}
-
-Buffer.prototype.readFloatBE = function readFloatBE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 4, this.length)
-  return ieee754.read(this, offset, false, 23, 4)
-}
-
-Buffer.prototype.readDoubleLE = function readDoubleLE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 8, this.length)
-  return ieee754.read(this, offset, true, 52, 8)
-}
-
-Buffer.prototype.readDoubleBE = function readDoubleBE (offset, noAssert) {
-  if (!noAssert) checkOffset(offset, 8, this.length)
-  return ieee754.read(this, offset, false, 52, 8)
-}
-
-function checkInt (buf, value, offset, ext, max, min) {
-  if (!Buffer.isBuffer(buf)) throw new TypeError('buffer must be a Buffer instance')
-  if (value > max || value < min) throw new RangeError('value is out of bounds')
-  if (offset + ext > buf.length) throw new RangeError('index out of range')
-}
-
-Buffer.prototype.writeUIntLE = function writeUIntLE (value, offset, byteLength, noAssert) {
-  value = +value
-  offset = offset | 0
-  byteLength = byteLength | 0
-  if (!noAssert) checkInt(this, value, offset, byteLength, Math.pow(2, 8 * byteLength), 0)
-
-  var mul = 1
-  var i = 0
-  this[offset] = value & 0xFF
-  while (++i < byteLength && (mul *= 0x100)) {
-    this[offset + i] = (value / mul) & 0xFF
-  }
-
-  return offset + byteLength
-}
-
-Buffer.prototype.writeUIntBE = function writeUIntBE (value, offset, byteLength, noAssert) {
-  value = +value
-  offset = offset | 0
-  byteLength = byteLength | 0
-  if (!noAssert) checkInt(this, value, offset, byteLength, Math.pow(2, 8 * byteLength), 0)
-
-  var i = byteLength - 1
-  var mul = 1
-  this[offset + i] = value & 0xFF
-  while (--i >= 0 && (mul *= 0x100)) {
-    this[offset + i] = (value / mul) & 0xFF
-  }
-
-  return offset + byteLength
-}
-
-Buffer.prototype.writeUInt8 = function writeUInt8 (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 1, 0xff, 0)
-  if (!Buffer.TYPED_ARRAY_SUPPORT) value = Math.floor(value)
-  this[offset] = value
-  return offset + 1
-}
-
-function objectWriteUInt16 (buf, value, offset, littleEndian) {
-  if (value < 0) value = 0xffff + value + 1
-  for (var i = 0, j = Math.min(buf.length - offset, 2); i < j; i++) {
-    buf[offset + i] = (value & (0xff << (8 * (littleEndian ? i : 1 - i)))) >>>
-      (littleEndian ? i : 1 - i) * 8
-  }
-}
-
-Buffer.prototype.writeUInt16LE = function writeUInt16LE (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 2, 0xffff, 0)
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    this[offset] = value
-    this[offset + 1] = (value >>> 8)
-  } else {
-    objectWriteUInt16(this, value, offset, true)
-  }
-  return offset + 2
-}
-
-Buffer.prototype.writeUInt16BE = function writeUInt16BE (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 2, 0xffff, 0)
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    this[offset] = (value >>> 8)
-    this[offset + 1] = value
-  } else {
-    objectWriteUInt16(this, value, offset, false)
-  }
-  return offset + 2
-}
-
-function objectWriteUInt32 (buf, value, offset, littleEndian) {
-  if (value < 0) value = 0xffffffff + value + 1
-  for (var i = 0, j = Math.min(buf.length - offset, 4); i < j; i++) {
-    buf[offset + i] = (value >>> (littleEndian ? i : 3 - i) * 8) & 0xff
-  }
-}
-
-Buffer.prototype.writeUInt32LE = function writeUInt32LE (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 4, 0xffffffff, 0)
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    this[offset + 3] = (value >>> 24)
-    this[offset + 2] = (value >>> 16)
-    this[offset + 1] = (value >>> 8)
-    this[offset] = value
-  } else {
-    objectWriteUInt32(this, value, offset, true)
-  }
-  return offset + 4
-}
-
-Buffer.prototype.writeUInt32BE = function writeUInt32BE (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 4, 0xffffffff, 0)
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    this[offset] = (value >>> 24)
-    this[offset + 1] = (value >>> 16)
-    this[offset + 2] = (value >>> 8)
-    this[offset + 3] = value
-  } else {
-    objectWriteUInt32(this, value, offset, false)
-  }
-  return offset + 4
-}
-
-Buffer.prototype.writeIntLE = function writeIntLE (value, offset, byteLength, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) {
-    var limit = Math.pow(2, 8 * byteLength - 1)
-
-    checkInt(this, value, offset, byteLength, limit - 1, -limit)
-  }
-
-  var i = 0
-  var mul = 1
-  var sub = value < 0 ? 1 : 0
-  this[offset] = value & 0xFF
-  while (++i < byteLength && (mul *= 0x100)) {
-    this[offset + i] = ((value / mul) >> 0) - sub & 0xFF
-  }
-
-  return offset + byteLength
-}
-
-Buffer.prototype.writeIntBE = function writeIntBE (value, offset, byteLength, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) {
-    var limit = Math.pow(2, 8 * byteLength - 1)
-
-    checkInt(this, value, offset, byteLength, limit - 1, -limit)
-  }
-
-  var i = byteLength - 1
-  var mul = 1
-  var sub = value < 0 ? 1 : 0
-  this[offset + i] = value & 0xFF
-  while (--i >= 0 && (mul *= 0x100)) {
-    this[offset + i] = ((value / mul) >> 0) - sub & 0xFF
-  }
-
-  return offset + byteLength
-}
-
-Buffer.prototype.writeInt8 = function writeInt8 (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 1, 0x7f, -0x80)
-  if (!Buffer.TYPED_ARRAY_SUPPORT) value = Math.floor(value)
-  if (value < 0) value = 0xff + value + 1
-  this[offset] = value
-  return offset + 1
-}
-
-Buffer.prototype.writeInt16LE = function writeInt16LE (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 2, 0x7fff, -0x8000)
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    this[offset] = value
-    this[offset + 1] = (value >>> 8)
-  } else {
-    objectWriteUInt16(this, value, offset, true)
-  }
-  return offset + 2
-}
-
-Buffer.prototype.writeInt16BE = function writeInt16BE (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 2, 0x7fff, -0x8000)
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    this[offset] = (value >>> 8)
-    this[offset + 1] = value
-  } else {
-    objectWriteUInt16(this, value, offset, false)
-  }
-  return offset + 2
-}
-
-Buffer.prototype.writeInt32LE = function writeInt32LE (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 4, 0x7fffffff, -0x80000000)
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    this[offset] = value
-    this[offset + 1] = (value >>> 8)
-    this[offset + 2] = (value >>> 16)
-    this[offset + 3] = (value >>> 24)
-  } else {
-    objectWriteUInt32(this, value, offset, true)
-  }
-  return offset + 4
-}
-
-Buffer.prototype.writeInt32BE = function writeInt32BE (value, offset, noAssert) {
-  value = +value
-  offset = offset | 0
-  if (!noAssert) checkInt(this, value, offset, 4, 0x7fffffff, -0x80000000)
-  if (value < 0) value = 0xffffffff + value + 1
-  if (Buffer.TYPED_ARRAY_SUPPORT) {
-    this[offset] = (value >>> 24)
-    this[offset + 1] = (value >>> 16)
-    this[offset + 2] = (value >>> 8)
-    this[offset + 3] = value
-  } else {
-    objectWriteUInt32(this, value, offset, false)
-  }
-  return offset + 4
-}
-
-function checkIEEE754 (buf, value, offset, ext, max, min) {
-  if (value > max || value < min) throw new RangeError('value is out of bounds')
-  if (offset + ext > buf.length) throw new RangeError('index out of range')
-  if (offset < 0) throw new RangeError('index out of range')
-}
-
-function writeFloat (buf, value, offset, littleEndian, noAssert) {
-  if (!noAssert) {
-    checkIEEE754(buf, value, offset, 4, 3.4028234663852886e+38, -3.4028234663852886e+38)
-  }
-  ieee754.write(buf, value, offset, littleEndian, 23, 4)
-  return offset + 4
-}
-
-Buffer.prototype.writeFloatLE = function writeFloatLE (value, offset, noAssert) {
-  return writeFloat(this, value, offset, true, noAssert)
-}
-
-Buffer.prototype.writeFloatBE = function writeFloatBE (value, offset, noAssert) {
-  return writeFloat(this, value, offset, false, noAssert)
-}
-
-function writeDouble (buf, value, offset, littleEndian, noAssert) {
-  if (!noAssert) {
-    checkIEEE754(buf, value, offset, 8, 1.7976931348623157E+308, -1.7976931348623157E+308)
-  }
-  ieee754.write(buf, value, offset, littleEndian, 52, 8)
-  return offset + 8
-}
-
-Buffer.prototype.writeDoubleLE = function writeDoubleLE (value, offset, noAssert) {
-  return writeDouble(this, value, offset, true, noAssert)
-}
-
-Buffer.prototype.writeDoubleBE = function writeDoubleBE (value, offset, noAssert) {
-  return writeDouble(this, value, offset, false, noAssert)
-}
-
-// copy(targetBuffer, targetStart=0, sourceStart=0, sourceEnd=buffer.length)
-Buffer.prototype.copy = function copy (target, targetStart, start, end) {
-  if (!start) start = 0
-  if (!end && end !== 0) end = this.length
-  if (targetStart >= target.length) targetStart = target.length
-  if (!targetStart) targetStart = 0
-  if (end > 0 && end < start) end = start
-
-  // Copy 0 bytes; we're done
-  if (end === start) return 0
-  if (target.length === 0 || this.length === 0) return 0
-
-  // Fatal error conditions
-  if (targetStart < 0) {
-    throw new RangeError('targetStart out of bounds')
-  }
-  if (start < 0 || start >= this.length) throw new RangeError('sourceStart out of bounds')
-  if (end < 0) throw new RangeError('sourceEnd out of bounds')
-
-  // Are we oob?
-  if (end > this.length) end = this.length
-  if (target.length - targetStart < end - start) {
-    end = target.length - targetStart + start
-  }
-
-  var len = end - start
-
-  if (len < 1000 || !Buffer.TYPED_ARRAY_SUPPORT) {
-    for (var i = 0; i < len; i++) {
-      target[i + targetStart] = this[i + start]
-    }
-  } else {
-    target._set(this.subarray(start, start + len), targetStart)
-  }
-
-  return len
-}
-
-// fill(value, start=0, end=buffer.length)
-Buffer.prototype.fill = function fill (value, start, end) {
-  if (!value) value = 0
-  if (!start) start = 0
-  if (!end) end = this.length
-
-  if (end < start) throw new RangeError('end < start')
-
-  // Fill 0 bytes; we're done
-  if (end === start) return
-  if (this.length === 0) return
-
-  if (start < 0 || start >= this.length) throw new RangeError('start out of bounds')
-  if (end < 0 || end > this.length) throw new RangeError('end out of bounds')
-
-  var i
-  if (typeof value === 'number') {
-    for (i = start; i < end; i++) {
-      this[i] = value
-    }
-  } else {
-    var bytes = utf8ToBytes(value.toString())
-    var len = bytes.length
-    for (i = start; i < end; i++) {
-      this[i] = bytes[i % len]
-    }
-  }
-
-  return this
-}
-
-/**
- * Creates a new `ArrayBuffer` with the *copied* memory of the buffer instance.
- * Added in Node 0.12. Only available in browsers that support ArrayBuffer.
- */
-Buffer.prototype.toArrayBuffer = function toArrayBuffer () {
-  if (typeof Uint8Array !== 'undefined') {
-    if (Buffer.TYPED_ARRAY_SUPPORT) {
-      return (new Buffer(this)).buffer
-    } else {
-      var buf = new Uint8Array(this.length)
-      for (var i = 0, len = buf.length; i < len; i += 1) {
-        buf[i] = this[i]
-      }
-      return buf.buffer
-    }
-  } else {
-    throw new TypeError('Buffer.toArrayBuffer not supported in this browser')
-  }
-}
-
-// HELPER FUNCTIONS
-// ================
-
-var BP = Buffer.prototype
-
-/**
- * Augment a Uint8Array *instance* (not the Uint8Array class!) with Buffer methods
- */
-Buffer._augment = function _augment (arr) {
-  arr.constructor = Buffer
-  arr._isBuffer = true
-
-  // save reference to original Uint8Array set method before overwriting
-  arr._set = arr.set
-
-  // deprecated, will be removed in node 0.13+
-  arr.get = BP.get
-  arr.set = BP.set
-
-  arr.write = BP.write
-  arr.toString = BP.toString
-  arr.toLocaleString = BP.toString
-  arr.toJSON = BP.toJSON
-  arr.equals = BP.equals
-  arr.compare = BP.compare
-  arr.indexOf = BP.indexOf
-  arr.copy = BP.copy
-  arr.slice = BP.slice
-  arr.readUIntLE = BP.readUIntLE
-  arr.readUIntBE = BP.readUIntBE
-  arr.readUInt8 = BP.readUInt8
-  arr.readUInt16LE = BP.readUInt16LE
-  arr.readUInt16BE = BP.readUInt16BE
-  arr.readUInt32LE = BP.readUInt32LE
-  arr.readUInt32BE = BP.readUInt32BE
-  arr.readIntLE = BP.readIntLE
-  arr.readIntBE = BP.readIntBE
-  arr.readInt8 = BP.readInt8
-  arr.readInt16LE = BP.readInt16LE
-  arr.readInt16BE = BP.readInt16BE
-  arr.readInt32LE = BP.readInt32LE
-  arr.readInt32BE = BP.readInt32BE
-  arr.readFloatLE = BP.readFloatLE
-  arr.readFloatBE = BP.readFloatBE
-  arr.readDoubleLE = BP.readDoubleLE
-  arr.readDoubleBE = BP.readDoubleBE
-  arr.writeUInt8 = BP.writeUInt8
-  arr.writeUIntLE = BP.writeUIntLE
-  arr.writeUIntBE = BP.writeUIntBE
-  arr.writeUInt16LE = BP.writeUInt16LE
-  arr.writeUInt16BE = BP.writeUInt16BE
-  arr.writeUInt32LE = BP.writeUInt32LE
-  arr.writeUInt32BE = BP.writeUInt32BE
-  arr.writeIntLE = BP.writeIntLE
-  arr.writeIntBE = BP.writeIntBE
-  arr.writeInt8 = BP.writeInt8
-  arr.writeInt16LE = BP.writeInt16LE
-  arr.writeInt16BE = BP.writeInt16BE
-  arr.writeInt32LE = BP.writeInt32LE
-  arr.writeInt32BE = BP.writeInt32BE
-  arr.writeFloatLE = BP.writeFloatLE
-  arr.writeFloatBE = BP.writeFloatBE
-  arr.writeDoubleLE = BP.writeDoubleLE
-  arr.writeDoubleBE = BP.writeDoubleBE
-  arr.fill = BP.fill
-  arr.inspect = BP.inspect
-  arr.toArrayBuffer = BP.toArrayBuffer
-
-  return arr
-}
-
-var INVALID_BASE64_RE = /[^+\/0-9A-z\-]/g
-
-function base64clean (str) {
-  // Node strips out invalid characters like \n and \t from the string, base64-js does not
-  str = stringtrim(str).replace(INVALID_BASE64_RE, '')
-  // Node converts strings with length < 2 to ''
-  if (str.length < 2) return ''
-  // Node allows for non-padded base64 strings (missing trailing ===), base64-js does not
-  while (str.length % 4 !== 0) {
-    str = str + '='
-  }
-  return str
-}
-
-function stringtrim (str) {
-  if (str.trim) return str.trim()
-  return str.replace(/^\s+|\s+$/g, '')
-}
-
-function toHex (n) {
-  if (n < 16) return '0' + n.toString(16)
-  return n.toString(16)
-}
-
-function utf8ToBytes (string, units) {
-  units = units || Infinity
-  var codePoint
-  var length = string.length
-  var leadSurrogate = null
-  var bytes = []
-  var i = 0
-
-  for (; i < length; i++) {
-    codePoint = string.charCodeAt(i)
-
-    // is surrogate component
-    if (codePoint > 0xD7FF && codePoint < 0xE000) {
-      // last char was a lead
-      if (leadSurrogate) {
-        // 2 leads in a row
-        if (codePoint < 0xDC00) {
-          if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
-          leadSurrogate = codePoint
-          continue
-        } else {
-          // valid surrogate pair
-          codePoint = leadSurrogate - 0xD800 << 10 | codePoint - 0xDC00 | 0x10000
-          leadSurrogate = null
+    function push(ref) {
+      if (typeof ref.id === 'string') {
+        var id = $.resolveURL(fakeroot, ref.id).replace(/\/#?$/, '');
+
+        if (id.indexOf('#') > -1) {
+          var parts = id.split('#');
+
+          if (parts[1].charAt() === '/') {
+            id = parts[0];
+          } else {
+            id = parts[1] || parts[0];
+          }
         }
-      } else {
-        // no lead yet
 
-        if (codePoint > 0xDBFF) {
-          // unexpected trail
-          if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
-          continue
-        } else if (i + 1 === length) {
-          // unpaired lead
-          if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
-          continue
-        } else {
-          // valid lead
-          leadSurrogate = codePoint
-          continue
+        if (!$ref.refs[id]) {
+          $ref.refs[id] = ref;
         }
       }
-    } else if (leadSurrogate) {
-      // valid bmp char, but last char was a lead
-      if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
-      leadSurrogate = null
     }
 
-    // encode utf8
-    if (codePoint < 0x80) {
-      if ((units -= 1) < 0) break
-      bytes.push(codePoint)
-    } else if (codePoint < 0x800) {
-      if ((units -= 2) < 0) break
-      bytes.push(
-        codePoint >> 0x6 | 0xC0,
-        codePoint & 0x3F | 0x80
-      )
-    } else if (codePoint < 0x10000) {
-      if ((units -= 3) < 0) break
-      bytes.push(
-        codePoint >> 0xC | 0xE0,
-        codePoint >> 0x6 & 0x3F | 0x80,
-        codePoint & 0x3F | 0x80
-      )
-    } else if (codePoint < 0x200000) {
-      if ((units -= 4) < 0) break
-      bytes.push(
-        codePoint >> 0x12 | 0xF0,
-        codePoint >> 0xC & 0x3F | 0x80,
-        codePoint >> 0x6 & 0x3F | 0x80,
-        codePoint & 0x3F | 0x80
-      )
-    } else {
-      throw new Error('Invalid code point')
-    }
+    (refs || []).concat([schema]).forEach(function(ref) {
+      schema = $.normalizeSchema(fakeroot, ref, push);
+      push(schema);
+    });
+
+    return $.resolveSchema(schema, $ref.refs, ex);
   }
 
-  return bytes
-}
+  $ref.refs = {};
+  $ref.util = $;
 
-function asciiToBytes (str) {
-  var byteArray = []
-  for (var i = 0; i < str.length; i++) {
-    // Node's code seems to be doing this and not & 0x7F..
-    byteArray.push(str.charCodeAt(i) & 0xFF)
-  }
-  return byteArray
-}
-
-function utf16leToBytes (str, units) {
-  var c, hi, lo
-  var byteArray = []
-  for (var i = 0; i < str.length; i++) {
-    if ((units -= 2) < 0) break
-
-    c = str.charCodeAt(i)
-    hi = c >> 8
-    lo = c % 256
-    byteArray.push(lo)
-    byteArray.push(hi)
-  }
-
-  return byteArray
-}
-
-function base64ToBytes (str) {
-  return base64.toByteArray(base64clean(str))
-}
-
-function blitBuffer (src, dst, offset, length) {
-  for (var i = 0; i < length; i++) {
-    if ((i + offset >= dst.length) || (i >= src.length)) break
-    dst[i + offset] = src[i]
-  }
-  return i
-}
-
-function decodeUtf8Char (str) {
-  try {
-    return decodeURIComponent(str)
-  } catch (err) {
-    return String.fromCharCode(0xFFFD) // UTF 8 invalid char
-  }
-}
-
-},{"base64-js":2,"ieee754":3,"is-array":4}],2:[function(require,module,exports){
-var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-;(function (exports) {
-	'use strict';
-
-  var Arr = (typeof Uint8Array !== 'undefined')
-    ? Uint8Array
-    : Array
-
-	var PLUS   = '+'.charCodeAt(0)
-	var SLASH  = '/'.charCodeAt(0)
-	var NUMBER = '0'.charCodeAt(0)
-	var LOWER  = 'a'.charCodeAt(0)
-	var UPPER  = 'A'.charCodeAt(0)
-	var PLUS_URL_SAFE = '-'.charCodeAt(0)
-	var SLASH_URL_SAFE = '_'.charCodeAt(0)
-
-	function decode (elt) {
-		var code = elt.charCodeAt(0)
-		if (code === PLUS ||
-		    code === PLUS_URL_SAFE)
-			return 62 // '+'
-		if (code === SLASH ||
-		    code === SLASH_URL_SAFE)
-			return 63 // '/'
-		if (code < NUMBER)
-			return -1 //no match
-		if (code < NUMBER + 10)
-			return code - NUMBER + 26 + 26
-		if (code < UPPER + 26)
-			return code - UPPER
-		if (code < LOWER + 26)
-			return code - LOWER + 26
-	}
-
-	function b64ToByteArray (b64) {
-		var i, j, l, tmp, placeHolders, arr
-
-		if (b64.length % 4 > 0) {
-			throw new Error('Invalid string. Length must be a multiple of 4')
-		}
-
-		// the number of equal signs (place holders)
-		// if there are two placeholders, than the two characters before it
-		// represent one byte
-		// if there is only one, then the three characters before it represent 2 bytes
-		// this is just a cheap hack to not do indexOf twice
-		var len = b64.length
-		placeHolders = '=' === b64.charAt(len - 2) ? 2 : '=' === b64.charAt(len - 1) ? 1 : 0
-
-		// base64 is 4/3 + up to two characters of the original data
-		arr = new Arr(b64.length * 3 / 4 - placeHolders)
-
-		// if there are placeholders, only get up to the last complete 4 chars
-		l = placeHolders > 0 ? b64.length - 4 : b64.length
-
-		var L = 0
-
-		function push (v) {
-			arr[L++] = v
-		}
-
-		for (i = 0, j = 0; i < l; i += 4, j += 3) {
-			tmp = (decode(b64.charAt(i)) << 18) | (decode(b64.charAt(i + 1)) << 12) | (decode(b64.charAt(i + 2)) << 6) | decode(b64.charAt(i + 3))
-			push((tmp & 0xFF0000) >> 16)
-			push((tmp & 0xFF00) >> 8)
-			push(tmp & 0xFF)
-		}
-
-		if (placeHolders === 2) {
-			tmp = (decode(b64.charAt(i)) << 2) | (decode(b64.charAt(i + 1)) >> 4)
-			push(tmp & 0xFF)
-		} else if (placeHolders === 1) {
-			tmp = (decode(b64.charAt(i)) << 10) | (decode(b64.charAt(i + 1)) << 4) | (decode(b64.charAt(i + 2)) >> 2)
-			push((tmp >> 8) & 0xFF)
-			push(tmp & 0xFF)
-		}
-
-		return arr
-	}
-
-	function uint8ToBase64 (uint8) {
-		var i,
-			extraBytes = uint8.length % 3, // if we have 1 byte left, pad 2 bytes
-			output = "",
-			temp, length
-
-		function encode (num) {
-			return lookup.charAt(num)
-		}
-
-		function tripletToBase64 (num) {
-			return encode(num >> 18 & 0x3F) + encode(num >> 12 & 0x3F) + encode(num >> 6 & 0x3F) + encode(num & 0x3F)
-		}
-
-		// go through the array every three bytes, we'll deal with trailing stuff later
-		for (i = 0, length = uint8.length - extraBytes; i < length; i += 3) {
-			temp = (uint8[i] << 16) + (uint8[i + 1] << 8) + (uint8[i + 2])
-			output += tripletToBase64(temp)
-		}
-
-		// pad the end with zeros, but make sure to not forget the extra bytes
-		switch (extraBytes) {
-			case 1:
-				temp = uint8[uint8.length - 1]
-				output += encode(temp >> 2)
-				output += encode((temp << 4) & 0x3F)
-				output += '=='
-				break
-			case 2:
-				temp = (uint8[uint8.length - 2] << 8) + (uint8[uint8.length - 1])
-				output += encode(temp >> 10)
-				output += encode((temp >> 4) & 0x3F)
-				output += encode((temp << 2) & 0x3F)
-				output += '='
-				break
-		}
-
-		return output
-	}
-
-	exports.toByteArray = b64ToByteArray
-	exports.fromByteArray = uint8ToBase64
-}(typeof exports === 'undefined' ? (this.base64js = {}) : exports))
-
-},{}],3:[function(require,module,exports){
-exports.read = function (buffer, offset, isLE, mLen, nBytes) {
-  var e, m,
-      eLen = nBytes * 8 - mLen - 1,
-      eMax = (1 << eLen) - 1,
-      eBias = eMax >> 1,
-      nBits = -7,
-      i = isLE ? (nBytes - 1) : 0,
-      d = isLE ? -1 : 1,
-      s = buffer[offset + i]
-
-  i += d
-
-  e = s & ((1 << (-nBits)) - 1)
-  s >>= (-nBits)
-  nBits += eLen
-  for (; nBits > 0; e = e * 256 + buffer[offset + i], i += d, nBits -= 8) {}
-
-  m = e & ((1 << (-nBits)) - 1)
-  e >>= (-nBits)
-  nBits += mLen
-  for (; nBits > 0; m = m * 256 + buffer[offset + i], i += d, nBits -= 8) {}
-
-  if (e === 0) {
-    e = 1 - eBias
-  } else if (e === eMax) {
-    return m ? NaN : ((s ? -1 : 1) * Infinity)
-  } else {
-    m = m + Math.pow(2, mLen)
-    e = e - eBias
-  }
-  return (s ? -1 : 1) * m * Math.pow(2, e - mLen)
-}
-
-exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
-  var e, m, c,
-      eLen = nBytes * 8 - mLen - 1,
-      eMax = (1 << eLen) - 1,
-      eBias = eMax >> 1,
-      rt = (mLen === 23 ? Math.pow(2, -24) - Math.pow(2, -77) : 0),
-      i = isLE ? 0 : (nBytes - 1),
-      d = isLE ? 1 : -1,
-      s = value < 0 || (value === 0 && 1 / value < 0) ? 1 : 0
-
-  value = Math.abs(value)
-
-  if (isNaN(value) || value === Infinity) {
-    m = isNaN(value) ? 1 : 0
-    e = eMax
-  } else {
-    e = Math.floor(Math.log(value) / Math.LN2)
-    if (value * (c = Math.pow(2, -e)) < 1) {
-      e--
-      c *= 2
-    }
-    if (e + eBias >= 1) {
-      value += rt / c
-    } else {
-      value += rt * Math.pow(2, 1 - eBias)
-    }
-    if (value * c >= 2) {
-      e++
-      c /= 2
-    }
-
-    if (e + eBias >= eMax) {
-      m = 0
-      e = eMax
-    } else if (e + eBias >= 1) {
-      m = (value * c - 1) * Math.pow(2, mLen)
-      e = e + eBias
-    } else {
-      m = value * Math.pow(2, eBias - 1) * Math.pow(2, mLen)
-      e = 0
-    }
-  }
-
-  for (; mLen >= 8; buffer[offset + i] = m & 0xff, i += d, m /= 256, mLen -= 8) {}
-
-  e = (e << mLen) | m
-  eLen += mLen
-  for (; eLen > 0; buffer[offset + i] = e & 0xff, i += d, e /= 256, eLen -= 8) {}
-
-  buffer[offset + i - d] |= s * 128
-}
-
-},{}],4:[function(require,module,exports){
-
-/**
- * isArray
- */
-
-var isArray = Array.isArray;
-
-/**
- * toString
- */
-
-var str = Object.prototype.toString;
-
-/**
- * Whether or not the given `val`
- * is an array.
- *
- * example:
- *
- *        isArray([]);
- *        // > true
- *        isArray(arguments);
- *        // > false
- *        isArray('');
- *        // > false
- *
- * @param {mixed} val
- * @return {bool}
- */
-
-module.exports = isArray || function (val) {
-  return !! val && '[object Array]' == str.call(val);
+  return $ref;
 };
 
-},{}],5:[function(require,module,exports){
+instance.util = $;
+
+},{"./util/find-reference":3,"./util/normalize-schema":4,"./util/resolve-schema":5,"./util/uri-helpers":6}],2:[function(require,module,exports){
 'use strict';
 
-var container = require('./util/container'),
-    traverse = require('./util/traverse'),
-    formats = require('./util/formats');
+var clone = module.exports = function(obj, seen) {
+  seen = seen || [];
 
-var deref = require('deref');
-
-function generate(schema, refs) {
-  var $ = deref();
-
-  try {
-    if (Array.isArray(refs)) {
-      return traverse($(schema, refs, true));
-    } else {
-      $.refs = refs || {};
-    }
-
-    return traverse($(schema, true));
-  } catch (e) {
-    if (e.path) {
-      throw new Error(e.message + ' in ' + '/' + e.path.join('/'));
-    } else {
-      throw e;
-    }
-  }
-}
-
-generate.formats = formats;
-generate.extend = container.set;
-
-module.exports = generate;
-
-},{"./util/container":14,"./util/formats":16,"./util/traverse":21,"deref":23}],6:[function(require,module,exports){
-'use strict';
-
-var random = require('../util/random'),
-    traverse = require('../util/traverse'),
-    hasProps = require('../util/has-props');
-
-var ParseError = require('../util/error');
-
-function unique(path, items, value, sample) {
-  var tmp = [],
-      seen = [];
-
-  function walk(obj) {
-    var json = JSON.stringify(obj);
-
-    if (seen.indexOf(json) === -1) {
-      seen.push(json);
-      tmp.push(obj);
-    }
+  if (seen.indexOf(obj) > -1) {
+    throw new Error('unable dereference circular structures');
   }
 
-  items.forEach(walk);
-
-  // TODO: find a better solution?
-  var limit = 100;
-
-  while (tmp.length !== items.length) {
-    walk(traverse(value.items || sample, path));
-
-    if (!limit--) {
-      break;
-    }
+  if (!obj || typeof obj !== 'object') {
+    return obj;
   }
 
-  return tmp;
-}
+  seen = seen.concat([obj]);
 
-module.exports = function(value, path) {
-  var items = [];
+  var target = Array.isArray(obj) ? [] : {};
 
-  if (!(value.items || value.additionalItems)) {
-    if (hasProps(value, 'minItems', 'maxItems', 'uniqueItems')) {
-      throw new ParseError('missing items for ' + JSON.stringify(value), path);
-    }
-
-    return items;
+  function copy(key, value) {
+    target[key] = clone(value, seen);
   }
 
-  if (Array.isArray(value.items)) {
-    return Array.prototype.concat.apply(items, value.items.map(function(item, key) {
-      return traverse(item, path.concat(['items', key]));
-    }));
-  }
-
-  var length = random(value.minItems, value.maxItems, 1, 5),
-      sample = typeof value.additionalItems === 'object' ? value.additionalItems : {};
-
-  for (var current = items.length; current < length; current += 1) {
-    items.push(traverse(value.items || sample, path.concat(['items', current])));
-  }
-
-  if (value.uniqueItems) {
-    return unique(path.concat(['items']), items, value, sample);
-  }
-
-  return items;
-};
-
-},{"../util/error":15,"../util/has-props":17,"../util/random":20,"../util/traverse":21}],7:[function(require,module,exports){
-'use strict';
-
-module.exports = function() {
-  return Math.random() > 0.5;
-};
-
-},{}],8:[function(require,module,exports){
-'use strict';
-
-var number = require('./number');
-
-// The `integer` type is just a wrapper for the `number` type. The `number` type
-// returns floating point numbers, and `integer` type truncates the fraction
-// part, leaving the result as an integer.
-//
-module.exports = function(value) {
-  value.hasPrecision = false;
-  var generated = number(value);
-  // whether the generated number is positive or negative, need to use either
-  // floor (positive) or ceil (negative) function to get rid of the fraction
-  return generated > 0 ? Math.floor(generated) : Math.ceil(generated);
-};
-
-},{"./number":10}],9:[function(require,module,exports){
-'use strict';
-
-module.exports = function() {
-  return null;
-};
-
-},{}],10:[function(require,module,exports){
-'use strict';
-
-var MIN_INTEGER = -100000000,
-    MAX_INTEGER = 100000000;
-
-var string = require('./string'),
-    random = require('../util/random');
-
-module.exports = function(value) {
-  if (value.faker || value.chance) {
-    return string(value);
-  }
-
-  var min = typeof value.minimum === 'undefined' ? MIN_INTEGER : value.minimum,
-      max = typeof value.maximum === 'undefined' ? MAX_INTEGER : value.maximum;
-
-  if (value.exclusiveMinimum && value.minimum) {
-    min += 1;
-  }
-
-  if (value.exclusiveMaximum && value.maximum) {
-    max -= 1;
-  }
-
-  if (value.multipleOf) {
-    var base = random(Math.floor(min / value.multipleOf), Math.floor(max / value.multipleOf)) * value.multipleOf;
-
-    while (base < min) {
-      base += value.multipleOf;
-    }
-
-    return base;
-  }
-
-  if (value.hasPrecision) {
-    return random(false, min, max);
-  }
-
-  return random(Math.random() > 0.5, min, max);
-};
-
-},{"../util/random":20,"./string":12}],11:[function(require,module,exports){
-'use strict';
-
-var container = require('../util/container'),
-    random = require('../util/random'),
-    traverse = require('../util/traverse'),
-    hasProps = require('../util/has-props');
-
-var faker = container.get('faker'),
-    RandExp = container.get('randexp'),
-    randexp = RandExp.randexp;
-
-var ParseError = require('../util/error');
-
-module.exports = function(value, path) {
-  var props = {};
-
-  if (!(value.properties || value.patternProperties || value.additionalProperties)) {
-    if (hasProps(value, 'minProperties', 'maxProperties', 'dependencies', 'required')) {
-      throw new ParseError('missing properties for ' + JSON.stringify(value), path);
-    }
-
-    return props;
-  }
-
-  var reqProps = value.required || [],
-      allProps = value.properties ? Object.keys(value.properties) : [];
-
-  reqProps.forEach(function(key) {
-    if (value.properties && value.properties[key]) {
-      props[key] = value.properties[key];
-    }
-  });
-
-  var optProps = allProps.filter(function(prop) {
-    return reqProps.indexOf(prop) === -1;
-  });
-
-  if (value.patternProperties) {
-    optProps = Array.prototype.concat.apply(optProps, Object.keys(value.patternProperties));
-  }
-
-  var length = random(value.minProperties, value.maxProperties, 0, optProps.length);
-
-  random.shuffle(optProps).slice(0, length).forEach(function(key) {
-    if (value.properties && value.properties[key]) {
-      props[key] = value.properties[key];
-    } else {
-      props[randexp(key)] = value.patternProperties[key];
-    }
-  });
-
-  var current = Object.keys(props).length,
-      sample = typeof value.additionalProperties === 'object' ? value.additionalProperties : {};
-
-  if (current < length) {
-    faker.lorem.words(length - current).forEach(function(key) {
-      props[key + randexp('\\w{1,10}')] = sample;
+  if (Array.isArray(target)) {
+    obj.forEach(function(value, key) {
+      copy(key, value);
+    });
+  } else if (Object.prototype.toString.call(obj) === '[object Object]') {
+    Object.keys(obj).forEach(function(key) {
+      copy(key, obj[key]);
     });
   }
 
-  return traverse(props, path.concat(['properties']));
+  return target;
 };
 
-},{"../util/container":14,"../util/error":15,"../util/has-props":17,"../util/random":20,"../util/traverse":21}],12:[function(require,module,exports){
+},{}],3:[function(require,module,exports){
 'use strict';
 
-var container = require('../util/container');
+var $ = require('./uri-helpers');
 
-var faker = container.get('faker'),
-    chance = container.get('chance'),
-    RandExp = container.get('randexp'),
-    randexp = RandExp.randexp;
+function get(obj, path) {
+  var hash = path.split('#')[1];
 
-var random = require('../util/random'),
-    formats = require('../util/formats');
-
-var regexps = {
-  email: '[a-zA-Z\\d][a-zA-Z\\d-]{1,13}[a-zA-Z\\d]@{hostname}',
-  hostname: '[a-zA-Z]{1,33}\\.[a-z]{2,4}',
-  ipv6: '[abcdef\\d]{4}(:[abcdef\\d]{4}){7}',
-  uri: '[a-zA-Z\\d_][\\w\\\/\\d_-]{1,40}'
-};
-
-function get(obj, key) {
-  var parts = key.split('.');
+  var parts = hash.split('/').slice(1);
 
   while (parts.length) {
-    var prop = parts.shift();
+    var key = decodeURIComponent(parts.shift()).replace(/~1/g, '/').replace(/~0/g, '~');
 
-    if (!obj[prop]) {
-      break;
+    if (typeof obj[key] === 'undefined') {
+      throw new Error('JSON pointer not found: ' + path);
     }
 
-    obj = obj[prop];
+    obj = obj[key];
   }
 
   return obj;
 }
 
-function generate(value) {
-  if (value.use) {
-    var args = [],
-        path = value.key;
+var find = module.exports = function(id, refs) {
+  var target = refs[id] || refs[id.split('#')[1]] || refs[$.getDocumentURI(id)];
 
-    if (typeof path === 'object') {
-      path = Object.keys(path)[0];
-
-      if (Array.isArray(value.key[path])) {
-        args = value.key[path];
-      } else {
-        args.push(value.key[path]);
+  if (target) {
+    target = id.indexOf('#/') > -1 ? get(target, id) : target;
+  } else {
+    for (var key in refs) {
+      if ($.resolveURL(refs[key].id, id) === refs[key].id) {
+        target = refs[key];
+        break;
       }
     }
-
-    var gen = get(value.gen, path);
-
-    if (typeof gen !== 'function') {
-      throw new Error('unknown ' + value.use + '-generator for ' + JSON.stringify(value.key));
-    }
-
-    return gen.apply(value.gen, args);
   }
 
-  switch (value.format) {
-    case 'date-time':
-      return new Date(random(0, 100000000000000)).toISOString();
-
-    case 'email':
-    case 'hostname':
-    case 'ipv6':
-    case 'uri':
-      return randexp(regexps[value.format]).replace(/\{(\w+)\}/, function(matches, key) {
-        return randexp(regexps[key]);
-      });
-
-    case 'ipv4':
-      return [0, 0, 0, 0].map(function() {
-        return random(0, 255);
-      }).join('.');
-
-    default:
-      var callback = formats(value.format);
-
-      if (typeof callback !== 'function') {
-        throw new Error('unknown generator for ' + JSON.stringify(value.format));
-      }
-
-      var generators = {
-        faker: faker,
-        chance: chance,
-        randexp: randexp
-      };
-
-      return callback(generators, value);
-  }
-}
-
-module.exports = function(value) {
-  if (value.faker || value.chance) {
-    return generate({
-      use: value.faker ? 'faker' : 'chance',
-      gen: value.faker ? faker : chance,
-      key: value.faker || value.chance
-    });
+  if (!target) {
+    throw new Error('Reference not found: ' + id);
   }
 
-  if (value.format) {
-    return generate(value);
+  while (target.$ref) {
+    target = find(target.$ref, refs);
   }
 
-  if (value.pattern) {
-    return randexp(value.pattern);
-  }
-
-  if (value.minLength || value.maxLength) {
-    var min = Math.max(0, value.minLength || 0),
-        max = random(min, value.maxLength);
-
-    return randexp('.{' + min + ',' + max + '}');
-  }
-
-  return faker.lorem.words(random(1, 5)).join(' ');
+  return target;
 };
 
-},{"../util/container":14,"../util/formats":16,"../util/random":20}],13:[function(require,module,exports){
+},{"./uri-helpers":6}],4:[function(require,module,exports){
 'use strict';
 
-function combine(target) {
-  var props = Array.prototype.slice.call(arguments, 1);
+var $ = require('./uri-helpers');
 
-  props.forEach(function(obj) {
-    for (var key in obj) {
-      if (Object.prototype.hasOwnProperty.call(obj, key)) {
-        target[key] = obj[key];
-      }
-    }
-  });
-}
+var cloneObj = require('./clone-obj');
 
-module.exports = combine;
-
-},{}],14:[function(require,module,exports){
-'use strict';
-
-// static requires - handle both initial dependency load (deps will be available
-// among other modules) as well as they will be included by browserify AST
-var Chance = require('chance');
-
-var container = {
-  faker: require('faker'),
-  chance: new Chance(),
-  randexp: require('randexp')
-};
-
-module.exports = {
-  set: function(name, callback) {
-    if (typeof container[name] === 'undefined') {
-      throw new ReferenceError('"' + name + '" dependency doesn\'t exist.');
-    }
-
-    container[name] = callback(container[name]);
-  },
-  get: function(name) {
-    return container[name];
-  }
-};
-
-},{"chance":22,"faker":30,"randexp":947}],15:[function(require,module,exports){
-'use strict';
-
-function ParseError(message, path) {
-  this.message = message;
-  this.path = path;
-  this.name = 'ParseError';
-}
-
-ParseError.prototype = Error.prototype;
-
-module.exports = ParseError;
-
-},{}],16:[function(require,module,exports){
-'use strict';
-
-var registry = {};
-
-module.exports = function(name, callback) {
-  if (callback) {
-    registry[name] = callback;
-  } else if (typeof name === 'object') {
-    for (var method in name) {
-      registry[method] = name[method];
-    }
-  } else if (name) {
-    return registry[name];
-  }
-
-  return registry;
-};
-
-},{}],17:[function(require,module,exports){
-'use strict';
-
-module.exports = function(obj) {
-  return Array.prototype.slice.call(arguments, 1).filter(function(key) {
-    return typeof obj[key] !== 'undefined';
-  }).length > 0;
-};
-
-},{}],18:[function(require,module,exports){
-'use strict';
-
-var inferredProperties = {
-  array: [
-    'additionalItems',
-    'items',
-    'maxItems',
-    'minItems',
-    'uniqueItems'
-  ],
-  integer: [
-    'exclusiveMaximum',
-    'exclusiveMinimum',
-    'maximum',
-    'minimum',
-    'multipleOf'
-  ],
-  object: [
-    'additionalProperties',
-    'dependencies',
-    'maxProperties',
-    'minProperties',
-    'patternProperties',
-    'properties',
-    'required'
-  ],
-  string: [
-    'maxLength',
-    'menlength',
-    'pattern'
-  ]
-};
-
-var subschemaProperties = [
-  'additionalItems', 'items', 'additionalProperties', 'dependencies', 'patternProperties', 'properties'
+var SCHEMA_URI = [
+  'http://json-schema.org/schema#',
+  'http://json-schema.org/draft-04/schema#'
 ];
 
-inferredProperties.number = inferredProperties.integer;
+function expand(obj, parent, callback) {
+  if (obj) {
+    var id = typeof obj.id === 'string' ? obj.id : '#';
 
-function mayHaveType(obj, path, props) {
-  return Object.keys(obj).filter(function(prop) {
-    // Do not attempt to infer properties named as subschema containers.  The reason for this is
-    // that any property name within those containers that matches one of the properties used for inferring missing type
-    // values causes the container itself to get processed which leads to invalid output.  (Issue 62)
-    if (props.indexOf(prop) > -1 && subschemaProperties.indexOf(path[path.length - 1]) === -1) {
-      return true;
-    }
-  }).length > 0;
-}
-
-module.exports = function(obj, path) {
-  for (var type in inferredProperties) {
-    if (mayHaveType(obj, path, inferredProperties[type])) {
-      return type;
-    }
-  }
-};
-
-},{}],19:[function(require,module,exports){
-'use strict';
-
-module.exports = {
-  array: require('../types/array'),
-  boolean: require('../types/boolean'),
-  integer: require('../types/integer'),
-  number: require('../types/number'),
-  null: require('../types/null'),
-  object: require('../types/object'),
-  string: require('../types/string')
-};
-
-},{"../types/array":6,"../types/boolean":7,"../types/integer":8,"../types/null":9,"../types/number":10,"../types/object":11,"../types/string":12}],20:[function(require,module,exports){
-'use strict';
-
-var container = require('./container');
-
-var faker = container.get('faker');
-
-var random = module.exports = function(min, max, defMin, defMax) {
-  var isInteger = true;
-
-  if (typeof min === 'boolean') {
-    // non-integer values
-    isInteger = min;
-    min = arguments[1];
-    max = arguments[2];
-    defMin = arguments[3];
-    defMax = arguments[4];
-  }
-
-  defMin = typeof defMin === 'undefined' ? random.MIN_NUMBER : defMin;
-  defMax = typeof defMax === 'undefined' ? random.MAX_NUMBER : defMax;
-
-  min = typeof min === 'undefined' ? defMin : min;
-  max = typeof max === 'undefined' ? defMax : max;
-
-  if (max < min) {
-    max += min;
-  }
-
-  return faker.random.number({
-    min: min,
-    max: max,
-    precision: isInteger ? 1 : Math.random()
-  });
-};
-
-random.shuffle = function(obj) {
-  var copy = obj.slice(),
-      length = obj.length;
-
-  for (; length > 0;) {
-    var key = Math.floor(Math.random() * length),
-        tmp = copy[--length];
-
-    copy[length] = copy[key];
-    copy[key] = tmp;
-  }
-
-  return copy;
-};
-
-random.pick = function(obj) {
-  return obj[Math.floor(Math.random() * obj.length)];
-};
-
-random.MIN_NUMBER = -100;
-random.MAX_NUMBER = 100;
-
-},{"./container":14}],21:[function(require,module,exports){
-'use strict';
-
-var random = require('./random'),
-    combine = require('./combine');
-
-var ParseError = require('./error');
-
-var inferredType = require('./inferred');
-
-var primitives = null;
-
-function reduce(obj) {
-  var mix = obj.allOf || obj.anyOf || obj.oneOf;
-
-  if (!(mix && mix.length)) {
-    for (var key in obj) {
-      var value = obj[key];
-
-      if (typeof value === 'object' && !(key === 'enum' || key === 'required')) {
-        reduce(value);
-      }
+    if (!$.isURL(id)) {
+      id = $.resolveURL(parent === id ? null : parent, id);
     }
 
-    return;
-  }
-
-  if ((obj.oneOf || obj.anyOf) && mix.length) {
-    mix = [random.pick(mix)];
-  }
-
-  delete obj.allOf;
-  delete obj.anyOf;
-  delete obj.oneOf;
-
-  var fixed = {};
-
-  mix.forEach(function(value) {
-    combine(fixed, value);
-  });
-
-  combine(obj, fixed);
-
-  while (obj.allOf || obj.anyOf || obj.oneOf) {
-    reduce(obj);
-  }
-}
-
-function traverse(obj, path) {
-  if (primitives === null) {
-    primitives = require('./primitives');
-  }
-
-  var copy = {};
-
-  if (Array.isArray(obj)) {
-    copy = [];
-  }
-
-  path = path || [];
-
-  reduce(obj);
-
-  if (Array.isArray(obj.enum)) {
-    return random.pick(obj.enum);
-  }
-
-  var type = obj.type;
-
-  if (Array.isArray(type)) {
-    type = random.pick(type);
-  } else if (typeof type === 'undefined') {
-    // Attempt to infer the type
-    type = inferredType(obj, path) || type;
-  }
-
-  if (typeof type === 'string') {
-    if (!primitives[type]) {
-      throw new ParseError('unknown primitive ' + JSON.stringify(type), path.concat(['type']));
+    if (typeof obj.$ref === 'string' && !$.isURL(obj.$ref)) {
+      obj.$ref = $.resolveURL(id, obj.$ref);
     }
 
-    try {
-      return primitives[type](obj, path);
-    } catch (e) {
-      if (typeof e.path === 'undefined') {
-        throw new ParseError(e.message, path)
-      }
-
-      throw e;
+    if (typeof obj.id === 'string') {
+      obj.id = parent = id;
     }
   }
 
   for (var key in obj) {
     var value = obj[key];
 
-    if (typeof value === 'object') {
-      copy[key] = traverse(value, path.concat([key]));
-    } else {
-      copy[key] = value;
+    if (typeof value === 'object' && !(key === 'enum' || key === 'required')) {
+      expand(value, parent, callback);
     }
   }
 
-  return copy;
+  if (typeof callback === 'function') {
+    callback(obj);
+  }
 }
 
-module.exports = traverse;
+module.exports = function(fakeroot, schema, push) {
+  if (typeof fakeroot === 'object') {
+    push = schema;
+    schema = fakeroot;
+    fakeroot = null;
+  }
 
-},{"./combine":13,"./error":15,"./inferred":18,"./primitives":19,"./random":20}],22:[function(require,module,exports){
+  var base = fakeroot || '',
+      copy = cloneObj(schema);
+
+  if (copy.$schema && SCHEMA_URI.indexOf(copy.$schema) === -1) {
+    throw new Error('Unsupported schema version (v4 only)');
+  }
+
+  base = $.resolveURL(copy.$schema || SCHEMA_URI[0], base);
+
+  expand(copy, $.resolveURL(copy.id || '#', base), push);
+
+  copy.id = copy.id || base;
+
+  return copy;
+};
+
+},{"./clone-obj":2,"./uri-helpers":6}],5:[function(require,module,exports){
+'use strict';
+
+var $ = require('./uri-helpers');
+
+var find = require('./find-reference');
+
+var deepExtend = require('deep-extend');
+
+function isKey(prop) {
+  return prop === 'enum' || prop === 'required' || prop === 'definitions';
+}
+
+function copy(obj, refs, parent, resolve) {
+  var target =  Array.isArray(obj) ? [] : {};
+
+  if (typeof obj.$ref === 'string') {
+    var base = $.getDocumentURI(obj.$ref);
+
+    if (parent !== base || (resolve && obj.$ref.indexOf('#/') > -1)) {
+      var fixed = find(obj.$ref, refs);
+
+      deepExtend(obj, fixed);
+
+      delete obj.$ref;
+      delete obj.id;
+    }
+  }
+
+  for (var prop in obj) {
+    if (typeof obj[prop] === 'object' && !isKey(prop)) {
+      target[prop] = copy(obj[prop], refs, parent, resolve);
+    } else {
+      target[prop] = obj[prop];
+    }
+  }
+
+  return target;
+}
+
+module.exports = function(obj, refs, resolve) {
+  var fixedId = $.resolveURL(obj.$schema, obj.id),
+      parent = $.getDocumentURI(fixedId);
+
+  return copy(obj, refs, parent, resolve);
+};
+
+},{"./find-reference":3,"./uri-helpers":6,"deep-extend":7}],6:[function(require,module,exports){
+'use strict';
+
+// https://gist.github.com/pjt33/efb2f1134bab986113fd
+
+function URLUtils(url, baseURL) {
+  // remove leading ./
+  url = url.replace(/^\.\//, '');
+
+  var m = String(url).replace(/^\s+|\s+$/g, '').match(/^([^:\/?#]+:)?(?:\/\/(?:([^:@]*)(?::([^:@]*))?@)?(([^:\/?#]*)(?::(\d*))?))?([^?#]*)(\?[^#]*)?(#[\s\S]*)?/);
+  if (!m) {
+    throw new RangeError();
+  }
+  var href = m[0] || '';
+  var protocol = m[1] || '';
+  var username = m[2] || '';
+  var password = m[3] || '';
+  var host = m[4] || '';
+  var hostname = m[5] || '';
+  var port = m[6] || '';
+  var pathname = m[7] || '';
+  var search = m[8] || '';
+  var hash = m[9] || '';
+  if (baseURL !== undefined) {
+    var base = new URLUtils(baseURL);
+    var flag = protocol === '' && host === '' && username === '';
+    if (flag && pathname === '' && search === '') {
+      search = base.search;
+    }
+    if (flag && pathname.charAt(0) !== '/') {
+      pathname = (pathname !== '' ? (base.pathname.slice(0, base.pathname.lastIndexOf('/') + 1) + pathname) : base.pathname);
+    }
+    // dot segments removal
+    var output = [];
+
+    pathname.replace(/\/?[^\/]+/g, function(p) {
+      if (p === '/..') {
+        output.pop();
+      } else {
+        output.push(p);
+      }
+    });
+
+    pathname = output.join('') || '/';
+
+    if (flag) {
+      port = base.port;
+      hostname = base.hostname;
+      host = base.host;
+      password = base.password;
+      username = base.username;
+    }
+    if (protocol === '') {
+      protocol = base.protocol;
+    }
+    href = protocol + (host !== '' ? '//' : '') + (username !== '' ? username + (password !== '' ? ':' + password : '') + '@' : '') + host + pathname + search + hash;
+  }
+  this.href = href;
+  this.origin = protocol + (host !== '' ? '//' + host : '');
+  this.protocol = protocol;
+  this.username = username;
+  this.password = password;
+  this.host = host;
+  this.hostname = hostname;
+  this.port = port;
+  this.pathname = pathname;
+  this.search = search;
+  this.hash = hash;
+}
+
+function isURL(path) {
+  if (typeof path === 'string' && /^\w+:\/\//.test(path)) {
+    return true;
+  }
+}
+
+function parseURI(href, base) {
+  return new URLUtils(href, base);
+}
+
+function resolveURL(base, href) {
+  base = base || 'http://json-schema.org/schema#';
+
+  href = parseURI(href, base);
+  base = parseURI(base);
+
+  if (base.hash && !href.hash) {
+    return href.href + base.hash;
+  }
+
+  return href.href;
+}
+
+function getDocumentURI(uri) {
+  return typeof uri === 'string' && uri.split('#')[0];
+}
+
+module.exports = {
+  isURL: isURL,
+  parseURI: parseURI,
+  resolveURL: resolveURL,
+  getDocumentURI: getDocumentURI
+};
+
+},{}],7:[function(require,module,exports){
+(function (Buffer){
+/*!
+ * @description Recursive object extending
+ * @author Viacheslav Lotsmanov <lotsmanov89@gmail.com>
+ * @license MIT
+ *
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2013-2015 Viacheslav Lotsmanov
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+'use strict';
+
+function isSpecificValue(val) {
+	return (
+		val instanceof Buffer
+		|| val instanceof Date
+		|| val instanceof RegExp
+	) ? true : false;
+}
+
+function cloneSpecificValue(val) {
+	if (val instanceof Buffer) {
+		var x = new Buffer(val.length);
+		val.copy(x);
+		return x;
+	} else if (val instanceof Date) {
+		return new Date(val.getTime());
+	} else if (val instanceof RegExp) {
+		return new RegExp(val);
+	} else {
+		throw new Error('Unexpected situation');
+	}
+}
+
+/**
+ * Recursive cloning array.
+ */
+function deepCloneArray(arr) {
+	var clone = [];
+	arr.forEach(function (item, index) {
+		if (typeof item === 'object' && item !== null) {
+			if (Array.isArray(item)) {
+				clone[index] = deepCloneArray(item);
+			} else if (isSpecificValue(item)) {
+				clone[index] = cloneSpecificValue(item);
+			} else {
+				clone[index] = deepExtend({}, item);
+			}
+		} else {
+			clone[index] = item;
+		}
+	});
+	return clone;
+}
+
+/**
+ * Extening object that entered in first argument.
+ *
+ * Returns extended object or false if have no target object or incorrect type.
+ *
+ * If you wish to clone source object (without modify it), just use empty new
+ * object as first argument, like this:
+ *   deepExtend({}, yourObj_1, [yourObj_N]);
+ */
+var deepExtend = module.exports = function (/*obj_1, [obj_2], [obj_N]*/) {
+	if (arguments.length < 1 || typeof arguments[0] !== 'object') {
+		return false;
+	}
+
+	if (arguments.length < 2) {
+		return arguments[0];
+	}
+
+	var target = arguments[0];
+
+	// convert arguments to array and cut off target object
+	var args = Array.prototype.slice.call(arguments, 1);
+
+	var val, src, clone;
+
+	args.forEach(function (obj) {
+		// skip argument if it is array or isn't object
+		if (typeof obj !== 'object' || Array.isArray(obj)) {
+			return;
+		}
+
+		Object.keys(obj).forEach(function (key) {
+			src = target[key]; // source value
+			val = obj[key]; // new value
+
+			// recursion prevention
+			if (val === target) {
+				return;
+
+			/**
+			 * if new value isn't object then just overwrite by new value
+			 * instead of extending.
+			 */
+			} else if (typeof val !== 'object' || val === null) {
+				target[key] = val;
+				return;
+
+			// just clone arrays (and recursive clone objects inside)
+			} else if (Array.isArray(val)) {
+				target[key] = deepCloneArray(val);
+				return;
+
+			// custom cloning and overwrite for specific objects
+			} else if (isSpecificValue(val)) {
+				target[key] = cloneSpecificValue(val);
+				return;
+
+			// overwrite by new value if source isn't object or array
+			} else if (typeof src !== 'object' || src === null || Array.isArray(src)) {
+				target[key] = deepExtend({}, val);
+				return;
+
+			// source value and new value is objects both, extending...
+			} else {
+				target[key] = deepExtend(src, val);
+				return;
+			}
+		});
+	});
+
+	return target;
+}
+
+}).call(this,require("buffer").Buffer)
+},{"buffer":926}],8:[function(require,module,exports){
 (function (Buffer){
 //  Chance.js 0.8.0
 //  http://chancejs.com
@@ -4940,520 +3105,12 @@ module.exports = traverse;
 })();
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":1}],23:[function(require,module,exports){
-'use strict';
-
-var $ = require('./util/uri-helpers');
-
-$.findByRef = require('./util/find-reference');
-$.resolveSchema = require('./util/resolve-schema');
-$.normalizeSchema = require('./util/normalize-schema');
-
-var instance = module.exports = function() {
-  function $ref(fakeroot, schema, refs, ex) {
-    if (typeof fakeroot === 'object') {
-      ex = refs;
-      refs = schema;
-      schema = fakeroot;
-      fakeroot = undefined;
-    }
-
-    if (typeof schema !== 'object') {
-      throw new Error('schema must be an object');
-    }
-
-    if (typeof refs !== 'undefined' && !Array.isArray(refs)) {
-      ex = !!refs;
-      refs = [];
-    }
-
-    function push(ref) {
-      if (typeof ref.id === 'string') {
-        var id = $.resolveURL(fakeroot, ref.id).replace(/\/#?$/, '');
-
-        if (id.indexOf('#') > -1) {
-          var parts = id.split('#');
-
-          if (parts[1].charAt() === '/') {
-            id = parts[0];
-          } else {
-            id = parts[1] || parts[0];
-          }
-        }
-
-        if (!$ref.refs[id]) {
-          $ref.refs[id] = ref;
-        }
-      }
-    }
-
-    (refs || []).concat([schema]).forEach(function(ref) {
-      schema = $.normalizeSchema(fakeroot, ref, push);
-      push(schema);
-    });
-
-    return $.resolveSchema(schema, $ref.refs, ex);
-  }
-
-  $ref.refs = {};
-  $ref.util = $;
-
-  return $ref;
-};
-
-instance.util = $;
-
-},{"./util/find-reference":25,"./util/normalize-schema":26,"./util/resolve-schema":27,"./util/uri-helpers":28}],24:[function(require,module,exports){
-'use strict';
-
-var clone = module.exports = function(obj, seen) {
-  seen = seen || [];
-
-  if (seen.indexOf(obj) > -1) {
-    throw new Error('unable dereference circular structures');
-  }
-
-  if (!obj || typeof obj !== 'object') {
-    return obj;
-  }
-
-  seen.push(obj);
-
-  var target = Array.isArray(obj) ? [] : {};
-
-  function copy(key, value) {
-    target[key] = clone(value, seen);
-  }
-
-  if (Array.isArray(target)) {
-    obj.forEach(function(value, key) {
-      copy(key, value);
-    });
-  } else if (Object.prototype.toString.call(obj) === '[object Object]') {
-    Object.keys(obj).forEach(function(key) {
-      copy(key, obj[key]);
-    });
-  }
-
-  return target;
-};
-
-},{}],25:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-function get(obj, path) {
-  var hash = path.split('#')[1];
-
-  var parts = hash.split('/').slice(1);
-
-  while (parts.length) {
-    var key = decodeURIComponent(parts.shift()).replace(/~1/g, '/').replace(/~0/g, '~');
-
-    if (typeof obj[key] === 'undefined') {
-      throw new Error('JSON pointer not found: ' + path);
-    }
-
-    obj = obj[key];
-  }
-
-  return obj;
-}
-
-var find = module.exports = function(id, refs) {
-  var target = refs[id] || refs[id.split('#')[1]] || refs[$.getDocumentURI(id)];
-
-  if (target) {
-    target = id.indexOf('#/') > -1 ? get(target, id) : target;
-  } else {
-    for (var key in refs) {
-      if ($.resolveURL(refs[key].id, id) === refs[key].id) {
-        target = refs[key];
-        break;
-      }
-    }
-  }
-
-  if (!target) {
-    throw new Error('Reference not found: ' + id);
-  }
-
-  while (target.$ref) {
-    target = find(target.$ref, refs);
-  }
-
-  return target;
-};
-
-},{"./uri-helpers":28}],26:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-var cloneObj = require('./clone-obj');
-
-var SCHEMA_URI = [
-  'http://json-schema.org/schema#',
-  'http://json-schema.org/draft-04/schema#'
-];
-
-function expand(obj, parent, callback) {
-  if (obj) {
-    var id = typeof obj.id === 'string' ? obj.id : '#';
-
-    if (!$.isURL(id)) {
-      id = $.resolveURL(parent === id ? null : parent, id);
-    }
-
-    if (typeof obj.$ref === 'string' && !$.isURL(obj.$ref)) {
-      obj.$ref = $.resolveURL(id, obj.$ref);
-    }
-
-    if (typeof obj.id === 'string') {
-      obj.id = parent = id;
-    }
-  }
-
-  for (var key in obj) {
-    var value = obj[key];
-
-    if (typeof value === 'object' && !(key === 'enum' || key === 'required')) {
-      expand(value, parent, callback);
-    }
-  }
-
-  if (typeof callback === 'function') {
-    callback(obj);
-  }
-}
-
-module.exports = function(fakeroot, schema, push) {
-  if (typeof fakeroot === 'object') {
-    push = schema;
-    schema = fakeroot;
-    fakeroot = null;
-  }
-
-  var base = fakeroot || '',
-      copy = cloneObj(schema);
-
-  if (copy.$schema && SCHEMA_URI.indexOf(copy.$schema) === -1) {
-    throw new Error('Unsupported schema version (v4 only)');
-  }
-
-  base = $.resolveURL(copy.$schema || SCHEMA_URI[0], base);
-
-  expand(copy, $.resolveURL(copy.id || '#', base), push);
-
-  copy.id = copy.id || base;
-
-  return copy;
-};
-
-},{"./clone-obj":24,"./uri-helpers":28}],27:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-var find = require('./find-reference');
-
-var deepExtend = require('deep-extend');
-
-function copy(obj, refs, parent, resolve) {
-  var target =  Array.isArray(obj) ? [] : {};
-
-  if (typeof obj.$ref === 'string') {
-    var base = $.getDocumentURI(obj.$ref);
-
-    if (parent !== base || (resolve && obj.$ref.indexOf('#/') > -1)) {
-      var fixed = find(obj.$ref, refs);
-
-      deepExtend(obj, fixed);
-
-      delete obj.$ref;
-      delete obj.id;
-    }
-  }
-
-  for (var prop in obj) {
-    var value = obj[prop];
-
-    if (typeof value === 'object' && !(prop === 'enum' || prop === 'required')) {
-      target[prop] = copy(value, refs, parent, resolve);
-    } else {
-      target[prop] = value;
-    }
-  }
-
-  return target;
-}
-
-module.exports = function(obj, refs, resolve) {
-  var fixedId = $.resolveURL(obj.$schema, obj.id),
-      parent = $.getDocumentURI(fixedId);
-
-  return copy(obj, refs, parent, resolve);
-};
-
-},{"./find-reference":25,"./uri-helpers":28,"deep-extend":29}],28:[function(require,module,exports){
-'use strict';
-
-// https://gist.github.com/pjt33/efb2f1134bab986113fd
-
-function URLUtils(url, baseURL) {
-  // remove leading ./
-  url = url.replace(/^\.\//, '');
-
-  var m = String(url).replace(/^\s+|\s+$/g, '').match(/^([^:\/?#]+:)?(?:\/\/(?:([^:@]*)(?::([^:@]*))?@)?(([^:\/?#]*)(?::(\d*))?))?([^?#]*)(\?[^#]*)?(#[\s\S]*)?/);
-  if (!m) {
-    throw new RangeError();
-  }
-  var href = m[0] || '';
-  var protocol = m[1] || '';
-  var username = m[2] || '';
-  var password = m[3] || '';
-  var host = m[4] || '';
-  var hostname = m[5] || '';
-  var port = m[6] || '';
-  var pathname = m[7] || '';
-  var search = m[8] || '';
-  var hash = m[9] || '';
-  if (baseURL !== undefined) {
-    var base = new URLUtils(baseURL);
-    var flag = protocol === '' && host === '' && username === '';
-    if (flag && pathname === '' && search === '') {
-      search = base.search;
-    }
-    if (flag && pathname.charAt(0) !== '/') {
-      pathname = (pathname !== '' ? (base.pathname.slice(0, base.pathname.lastIndexOf('/') + 1) + pathname) : base.pathname);
-    }
-    // dot segments removal
-    var output = [];
-
-    pathname.replace(/\/?[^\/]+/g, function(p) {
-      if (p === '/..') {
-        output.pop();
-      } else {
-        output.push(p);
-      }
-    });
-
-    pathname = output.join('') || '/';
-
-    if (flag) {
-      port = base.port;
-      hostname = base.hostname;
-      host = base.host;
-      password = base.password;
-      username = base.username;
-    }
-    if (protocol === '') {
-      protocol = base.protocol;
-    }
-    href = protocol + (host !== '' ? '//' : '') + (username !== '' ? username + (password !== '' ? ':' + password : '') + '@' : '') + host + pathname + search + hash;
-  }
-  this.href = href;
-  this.origin = protocol + (host !== '' ? '//' + host : '');
-  this.protocol = protocol;
-  this.username = username;
-  this.password = password;
-  this.host = host;
-  this.hostname = hostname;
-  this.port = port;
-  this.pathname = pathname;
-  this.search = search;
-  this.hash = hash;
-}
-
-function isURL(path) {
-  if (typeof path === 'string' && /^\w+:\/\//.test(path)) {
-    return true;
-  }
-}
-
-function parseURI(href, base) {
-  return new URLUtils(href, base);
-}
-
-function resolveURL(base, href) {
-  base = base || 'http://json-schema.org/schema#';
-
-  href = parseURI(href, base);
-  base = parseURI(base);
-
-  if (base.hash && !href.hash) {
-    return href.href + base.hash;
-  }
-
-  return href.href;
-}
-
-function getDocumentURI(uri) {
-  return typeof uri === 'string' && uri.split('#')[0];
-}
-
-module.exports = {
-  isURL: isURL,
-  parseURI: parseURI,
-  resolveURL: resolveURL,
-  getDocumentURI: getDocumentURI
-};
-
-},{}],29:[function(require,module,exports){
-(function (Buffer){
-/*!
- * @description Recursive object extending
- * @author Viacheslav Lotsmanov <lotsmanov89@gmail.com>
- * @license MIT
- *
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2015 Viacheslav Lotsmanov
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
-
-'use strict';
-
-function isSpecificValue(val) {
-	return (
-		val instanceof Buffer
-		|| val instanceof Date
-		|| val instanceof RegExp
-	) ? true : false;
-}
-
-function cloneSpecificValue(val) {
-	if (val instanceof Buffer) {
-		var x = new Buffer(val.length);
-		val.copy(x);
-		return x;
-	} else if (val instanceof Date) {
-		return new Date(val.getTime());
-	} else if (val instanceof RegExp) {
-		return new RegExp(val);
-	} else {
-		throw new Error('Unexpected situation');
-	}
-}
-
-/**
- * Recursive cloning array.
- */
-function deepCloneArray(arr) {
-	var clone = [];
-	arr.forEach(function (item, index) {
-		if (typeof item === 'object' && item !== null) {
-			if (Array.isArray(item)) {
-				clone[index] = deepCloneArray(item);
-			} else if (isSpecificValue(item)) {
-				clone[index] = cloneSpecificValue(item);
-			} else {
-				clone[index] = deepExtend({}, item);
-			}
-		} else {
-			clone[index] = item;
-		}
-	});
-	return clone;
-}
-
-/**
- * Extening object that entered in first argument.
- *
- * Returns extended object or false if have no target object or incorrect type.
- *
- * If you wish to clone source object (without modify it), just use empty new
- * object as first argument, like this:
- *   deepExtend({}, yourObj_1, [yourObj_N]);
- */
-var deepExtend = module.exports = function (/*obj_1, [obj_2], [obj_N]*/) {
-	if (arguments.length < 1 || typeof arguments[0] !== 'object') {
-		return false;
-	}
-
-	if (arguments.length < 2) {
-		return arguments[0];
-	}
-
-	var target = arguments[0];
-
-	// convert arguments to array and cut off target object
-	var args = Array.prototype.slice.call(arguments, 1);
-
-	var val, src, clone;
-
-	args.forEach(function (obj) {
-		// skip argument if it is array or isn't object
-		if (typeof obj !== 'object' || Array.isArray(obj)) {
-			return;
-		}
-
-		Object.keys(obj).forEach(function (key) {
-			src = target[key]; // source value
-			val = obj[key]; // new value
-
-			// recursion prevention
-			if (val === target) {
-				return;
-
-			/**
-			 * if new value isn't object then just overwrite by new value
-			 * instead of extending.
-			 */
-			} else if (typeof val !== 'object' || val === null) {
-				target[key] = val;
-				return;
-
-			// just clone arrays (and recursive clone objects inside)
-			} else if (Array.isArray(val)) {
-				target[key] = deepCloneArray(val);
-				return;
-
-			// custom cloning and overwrite for specific objects
-			} else if (isSpecificValue(val)) {
-				target[key] = cloneSpecificValue(val);
-				return;
-
-			// overwrite by new value if source isn't object or array
-			} else if (typeof src !== 'object' || src === null || Array.isArray(src)) {
-				target[key] = deepExtend({}, val);
-				return;
-
-			// source value and new value is objects both, extending...
-			} else {
-				target[key] = deepExtend(src, val);
-				return;
-			}
-		});
-	});
-
-	return target;
-}
-
-}).call(this,require("buffer").Buffer)
-},{"buffer":1}],30:[function(require,module,exports){
+},{"buffer":926}],9:[function(require,module,exports){
 // since we are requiring the top level of faker, load all locales by default
 var Faker = require('./lib');
 var faker = new Faker({ locales: require('./lib/locales') });
 module['exports'] = faker;
-},{"./lib":40,"./lib/locales":42}],31:[function(require,module,exports){
+},{"./lib":19,"./lib/locales":21}],10:[function(require,module,exports){
 function Address (faker) {
   var f = faker.fake,
       Helpers = faker.helpers;
@@ -5584,7 +3241,7 @@ function Address (faker) {
 
 module.exports = Address;
 
-},{}],32:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 var Commerce = function (faker) {
   var self = this;
 
@@ -5674,7 +3331,7 @@ var Commerce = function (faker) {
 };
 
 module['exports'] = Commerce;
-},{}],33:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 var Company = function (faker) {
   
   var self = this;
@@ -5739,7 +3396,7 @@ var Company = function (faker) {
 }
 
 module['exports'] = Company;
-},{}],34:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 var _Date = function (faker) {
   var self = this;
   self.past = function (years, refDate) {
@@ -5830,7 +3487,7 @@ var _Date = function (faker) {
 };
 
 module['exports'] = _Date;
-},{}],35:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 /*
   fake.js - generator method for combining faker methods based on string input
 
@@ -5894,7 +3551,7 @@ function Fake (faker) {
 }
 
 module['exports'] = Fake;
-},{}],36:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 var Finance = function (faker) {
   var Helpers = faker.helpers,
       self = this;
@@ -5981,7 +3638,7 @@ var Finance = function (faker) {
 }
 
 module['exports'] = Finance;
-},{}],37:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 var Hacker = function (faker) {
   var self = this;
   
@@ -6033,7 +3690,7 @@ var Hacker = function (faker) {
 };
 
 module['exports'] = Hacker;
-},{}],38:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 var Helpers = function (faker) {
 
   var self = this;
@@ -6235,7 +3892,7 @@ String.prototype.capitalize = function () { //v1.0
 */
 
 module['exports'] = Helpers;
-},{}],39:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 var Image = function (faker) {
 
   var self = this;
@@ -6299,7 +3956,7 @@ var Image = function (faker) {
 }
 
 module["exports"] = Image;
-},{}],40:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 /*
 
    this index.js file is used for including the faker library as a CommonJS module, instead of a bundle
@@ -6434,7 +4091,7 @@ Faker.prototype.seed = function(value) {
 }
 module['exports'] = Faker;
 
-},{"./address":31,"./commerce":32,"./company":33,"./date":34,"./fake":35,"./finance":36,"./hacker":37,"./helpers":38,"./image":39,"./internet":41,"./lorem":940,"./name":941,"./phone_number":942,"./random":943}],41:[function(require,module,exports){
+},{"./address":10,"./commerce":11,"./company":12,"./date":13,"./fake":14,"./finance":15,"./hacker":16,"./helpers":17,"./image":18,"./internet":20,"./lorem":919,"./name":920,"./phone_number":921,"./random":922}],20:[function(require,module,exports){
 var password_generator = require('../vendor/password-generator.js'),
     random_ua = require('../vendor/user-agent');
 
@@ -6549,7 +4206,7 @@ var Internet = function (faker) {
 
 module["exports"] = Internet;
 
-},{"../vendor/password-generator.js":945,"../vendor/user-agent":946}],42:[function(require,module,exports){
+},{"../vendor/password-generator.js":924,"../vendor/user-agent":925}],21:[function(require,module,exports){
 exports['de'] = require('./locales/de');
 exports['de_AT'] = require('./locales/de_AT');
 exports['de_CH'] = require('./locales/de_CH');
@@ -6585,7 +4242,7 @@ exports['vi'] = require('./locales/vi');
 exports['zh_CN'] = require('./locales/zh_CN');
 exports['zh_TW'] = require('./locales/zh_TW');
 
-},{"./locales/de":63,"./locales/de_AT":96,"./locales/de_CH":115,"./locales/en":185,"./locales/en_AU":214,"./locales/en_BORK":222,"./locales/en_CA":230,"./locales/en_GB":242,"./locales/en_IE":252,"./locales/en_IND":264,"./locales/en_US":276,"./locales/en_au_ocker":296,"./locales/es":328,"./locales/es_MX":372,"./locales/fa":391,"./locales/fr":417,"./locales/fr_CA":437,"./locales/ge":463,"./locales/it":498,"./locales/ja":520,"./locales/ko":541,"./locales/nb_NO":571,"./locales/nep":591,"./locales/nl":615,"./locales/pl":655,"./locales/pt_BR":684,"./locales/ru":721,"./locales/sk":761,"./locales/sv":805,"./locales/tr":831,"./locales/uk":864,"./locales/vi":891,"./locales/zh_CN":914,"./locales/zh_TW":933}],43:[function(require,module,exports){
+},{"./locales/de":42,"./locales/de_AT":75,"./locales/de_CH":94,"./locales/en":164,"./locales/en_AU":193,"./locales/en_BORK":201,"./locales/en_CA":209,"./locales/en_GB":221,"./locales/en_IE":231,"./locales/en_IND":243,"./locales/en_US":255,"./locales/en_au_ocker":275,"./locales/es":307,"./locales/es_MX":351,"./locales/fa":370,"./locales/fr":396,"./locales/fr_CA":416,"./locales/ge":442,"./locales/it":477,"./locales/ja":499,"./locales/ko":520,"./locales/nb_NO":550,"./locales/nep":570,"./locales/nl":594,"./locales/pl":634,"./locales/pt_BR":663,"./locales/ru":700,"./locales/sk":740,"./locales/sv":784,"./locales/tr":810,"./locales/uk":843,"./locales/vi":870,"./locales/zh_CN":893,"./locales/zh_TW":912}],22:[function(require,module,exports){
 module["exports"] = [
   "###",
   "##",
@@ -6595,7 +4252,7 @@ module["exports"] = [
   "##c"
 ];
 
-},{}],44:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 module["exports"] = [
   "#{city_prefix} #{Name.first_name}#{city_suffix}",
   "#{city_prefix} #{Name.first_name}",
@@ -6603,7 +4260,7 @@ module["exports"] = [
   "#{Name.last_name}#{city_suffix}"
 ];
 
-},{}],45:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 module["exports"] = [
   "Nord",
   "Ost",
@@ -6614,7 +4271,7 @@ module["exports"] = [
   "Bad"
 ];
 
-},{}],46:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 module["exports"] = [
   "stadt",
   "dorf",
@@ -6623,7 +4280,7 @@ module["exports"] = [
   "burg"
 ];
 
-},{}],47:[function(require,module,exports){
+},{}],26:[function(require,module,exports){
 module["exports"] = [
   "Ägypten",
   "Äquatorialguinea",
@@ -6864,12 +4521,12 @@ module["exports"] = [
   "Zypern"
 ];
 
-},{}],48:[function(require,module,exports){
+},{}],27:[function(require,module,exports){
 module["exports"] = [
   "Deutschland"
 ];
 
-},{}],49:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -6886,20 +4543,20 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":43,"./city":44,"./city_prefix":45,"./city_suffix":46,"./country":47,"./default_country":48,"./postcode":50,"./secondary_address":51,"./state":52,"./state_abbr":53,"./street_address":54,"./street_name":55,"./street_root":56}],50:[function(require,module,exports){
+},{"./building_number":22,"./city":23,"./city_prefix":24,"./city_suffix":25,"./country":26,"./default_country":27,"./postcode":29,"./secondary_address":30,"./state":31,"./state_abbr":32,"./street_address":33,"./street_name":34,"./street_root":35}],29:[function(require,module,exports){
 module["exports"] = [
   "#####",
   "#####"
 ];
 
-},{}],51:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 module["exports"] = [
   "Apt. ###",
   "Zimmer ###",
   "# OG"
 ];
 
-},{}],52:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 module["exports"] = [
   "Baden-Württemberg",
   "Bayern",
@@ -6919,7 +4576,7 @@ module["exports"] = [
   "Thüringen"
 ];
 
-},{}],53:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 module["exports"] = [
   "BW",
   "BY",
@@ -6939,17 +4596,17 @@ module["exports"] = [
   "TH"
 ];
 
-},{}],54:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 module["exports"] = [
   "#{street_name} #{building_number}"
 ];
 
-},{}],55:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 module["exports"] = [
   "#{street_root}"
 ];
 
-},{}],56:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 module["exports"] = [
   "Ackerweg",
   "Adalbert-Stifter-Str.",
@@ -7984,25 +5641,25 @@ module["exports"] = [
   "Zur alten Fabrik"
 ];
 
-},{}],57:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 module["exports"] = [
   "+49-1##-#######",
   "+49-1###-########"
 ];
 
-},{}],58:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 var cell_phone = {};
 module['exports'] = cell_phone;
 cell_phone.formats = require("./formats");
 
-},{"./formats":57}],59:[function(require,module,exports){
+},{"./formats":36}],38:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
 company.legal_form = require("./legal_form");
 company.name = require("./name");
 
-},{"./legal_form":60,"./name":61,"./suffix":62}],60:[function(require,module,exports){
+},{"./legal_form":39,"./name":40,"./suffix":41}],39:[function(require,module,exports){
 module["exports"] = [
   "GmbH",
   "AG",
@@ -8013,16 +5670,16 @@ module["exports"] = [
   "OHG"
 ];
 
-},{}],61:[function(require,module,exports){
+},{}],40:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name}-#{Name.last_name}",
   "#{Name.last_name}, #{Name.last_name} und #{Name.last_name}"
 ];
 
-},{}],62:[function(require,module,exports){
-arguments[4][60][0].apply(exports,arguments)
-},{"dup":60}],63:[function(require,module,exports){
+},{}],41:[function(require,module,exports){
+arguments[4][39][0].apply(exports,arguments)
+},{"dup":39}],42:[function(require,module,exports){
 var de = {};
 module['exports'] = de;
 de.title = "German";
@@ -8033,7 +5690,7 @@ de.lorem = require("./lorem");
 de.name = require("./name");
 de.phone_number = require("./phone_number");
 de.cell_phone = require("./cell_phone");
-},{"./address":49,"./cell_phone":58,"./company":59,"./internet":66,"./lorem":67,"./name":70,"./phone_number":76}],64:[function(require,module,exports){
+},{"./address":28,"./cell_phone":37,"./company":38,"./internet":45,"./lorem":46,"./name":49,"./phone_number":55}],43:[function(require,module,exports){
 module["exports"] = [
   "com",
   "info",
@@ -8044,25 +5701,25 @@ module["exports"] = [
   "ch"
 ];
 
-},{}],65:[function(require,module,exports){
+},{}],44:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.com",
   "hotmail.com"
 ];
 
-},{}],66:[function(require,module,exports){
+},{}],45:[function(require,module,exports){
 var internet = {};
 module['exports'] = internet;
 internet.free_email = require("./free_email");
 internet.domain_suffix = require("./domain_suffix");
 
-},{"./domain_suffix":64,"./free_email":65}],67:[function(require,module,exports){
+},{"./domain_suffix":43,"./free_email":44}],46:[function(require,module,exports){
 var lorem = {};
 module['exports'] = lorem;
 lorem.words = require("./words");
 
-},{"./words":68}],68:[function(require,module,exports){
+},{"./words":47}],47:[function(require,module,exports){
 module["exports"] = [
   "alias",
   "consequatur",
@@ -8315,7 +5972,7 @@ module["exports"] = [
   "repellat"
 ];
 
-},{}],69:[function(require,module,exports){
+},{}],48:[function(require,module,exports){
 module["exports"] = [
   "Aaron",
   "Abdul",
@@ -9474,7 +7131,7 @@ module["exports"] = [
   "Zoé"
 ];
 
-},{}],70:[function(require,module,exports){
+},{}],49:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
@@ -9483,7 +7140,7 @@ name.prefix = require("./prefix");
 name.nobility_title_prefix = require("./nobility_title_prefix");
 name.name = require("./name");
 
-},{"./first_name":69,"./last_name":71,"./name":72,"./nobility_title_prefix":73,"./prefix":74}],71:[function(require,module,exports){
+},{"./first_name":48,"./last_name":50,"./name":51,"./nobility_title_prefix":52,"./prefix":53}],50:[function(require,module,exports){
 module["exports"] = [
   "Abel",
   "Abicht",
@@ -11176,7 +8833,7 @@ module["exports"] = [
   "Überacker"
 ];
 
-},{}],72:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{first_name} #{last_name}",
   "#{first_name} #{nobility_title_prefix} #{last_name}",
@@ -11186,7 +8843,7 @@ module["exports"] = [
   "#{first_name} #{last_name}"
 ];
 
-},{}],73:[function(require,module,exports){
+},{}],52:[function(require,module,exports){
 module["exports"] = [
   "zu",
   "von",
@@ -11194,7 +8851,7 @@ module["exports"] = [
   "von der"
 ];
 
-},{}],74:[function(require,module,exports){
+},{}],53:[function(require,module,exports){
 module["exports"] = [
   "Hr.",
   "Fr.",
@@ -11202,7 +8859,7 @@ module["exports"] = [
   "Prof. Dr."
 ];
 
-},{}],75:[function(require,module,exports){
+},{}],54:[function(require,module,exports){
 module["exports"] = [
   "(0###) #########",
   "(0####) #######",
@@ -11210,19 +8867,19 @@ module["exports"] = [
   "+49-####-########"
 ];
 
-},{}],76:[function(require,module,exports){
+},{}],55:[function(require,module,exports){
 var phone_number = {};
 module['exports'] = phone_number;
 phone_number.formats = require("./formats");
 
-},{"./formats":75}],77:[function(require,module,exports){
-arguments[4][43][0].apply(exports,arguments)
-},{"dup":43}],78:[function(require,module,exports){
+},{"./formats":54}],56:[function(require,module,exports){
+arguments[4][22][0].apply(exports,arguments)
+},{"dup":22}],57:[function(require,module,exports){
 module["exports"] = [
   "#{city_name}"
 ];
 
-},{}],79:[function(require,module,exports){
+},{}],58:[function(require,module,exports){
 module["exports"] = [
   "Aigen im Mühlkreis",
   "Allerheiligen bei Wildon",
@@ -11344,14 +9001,14 @@ module["exports"] = [
   "Übersbach"
 ];
 
-},{}],80:[function(require,module,exports){
-arguments[4][47][0].apply(exports,arguments)
-},{"dup":47}],81:[function(require,module,exports){
+},{}],59:[function(require,module,exports){
+arguments[4][26][0].apply(exports,arguments)
+},{"dup":26}],60:[function(require,module,exports){
 module["exports"] = [
   "Österreich"
 ];
 
-},{}],82:[function(require,module,exports){
+},{}],61:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.country = require("./country");
@@ -11367,14 +9024,14 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":77,"./city":78,"./city_name":79,"./country":80,"./default_country":81,"./postcode":83,"./secondary_address":84,"./state":85,"./state_abbr":86,"./street_address":87,"./street_name":88,"./street_root":89}],83:[function(require,module,exports){
+},{"./building_number":56,"./city":57,"./city_name":58,"./country":59,"./default_country":60,"./postcode":62,"./secondary_address":63,"./state":64,"./state_abbr":65,"./street_address":66,"./street_name":67,"./street_root":68}],62:[function(require,module,exports){
 module["exports"] = [
   "####"
 ];
 
-},{}],84:[function(require,module,exports){
-arguments[4][51][0].apply(exports,arguments)
-},{"dup":51}],85:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
+arguments[4][30][0].apply(exports,arguments)
+},{"dup":30}],64:[function(require,module,exports){
 module["exports"] = [
   "Burgenland",
   "Kärnten",
@@ -11387,7 +9044,7 @@ module["exports"] = [
   "Wien"
 ];
 
-},{}],86:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 module["exports"] = [
   "Bgld.",
   "Ktn.",
@@ -11400,11 +9057,11 @@ module["exports"] = [
   "W"
 ];
 
-},{}],87:[function(require,module,exports){
-arguments[4][54][0].apply(exports,arguments)
-},{"dup":54}],88:[function(require,module,exports){
-arguments[4][55][0].apply(exports,arguments)
-},{"dup":55}],89:[function(require,module,exports){
+},{}],66:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"dup":33}],67:[function(require,module,exports){
+arguments[4][34][0].apply(exports,arguments)
+},{"dup":34}],68:[function(require,module,exports){
 module["exports"] = [
   "Ahorn",
   "Ahorngasse (St. Andrä)",
@@ -11606,7 +9263,7 @@ module["exports"] = [
   "Ötzbruck"
 ];
 
-},{}],90:[function(require,module,exports){
+},{}],69:[function(require,module,exports){
 module["exports"] = [
   "+43-6##-#######",
   "06##-########",
@@ -11614,17 +9271,17 @@ module["exports"] = [
   "06##########"
 ];
 
-},{}],91:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":90,"dup":58}],92:[function(require,module,exports){
-arguments[4][59][0].apply(exports,arguments)
-},{"./legal_form":93,"./name":94,"./suffix":95,"dup":59}],93:[function(require,module,exports){
-arguments[4][60][0].apply(exports,arguments)
-},{"dup":60}],94:[function(require,module,exports){
-arguments[4][61][0].apply(exports,arguments)
-},{"dup":61}],95:[function(require,module,exports){
-arguments[4][60][0].apply(exports,arguments)
-},{"dup":60}],96:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":69,"dup":37}],71:[function(require,module,exports){
+arguments[4][38][0].apply(exports,arguments)
+},{"./legal_form":72,"./name":73,"./suffix":74,"dup":38}],72:[function(require,module,exports){
+arguments[4][39][0].apply(exports,arguments)
+},{"dup":39}],73:[function(require,module,exports){
+arguments[4][40][0].apply(exports,arguments)
+},{"dup":40}],74:[function(require,module,exports){
+arguments[4][39][0].apply(exports,arguments)
+},{"dup":39}],75:[function(require,module,exports){
 var de_AT = {};
 module['exports'] = de_AT;
 de_AT.title = "German (Austria)";
@@ -11635,7 +9292,7 @@ de_AT.name = require("./name");
 de_AT.phone_number = require("./phone_number");
 de_AT.cell_phone = require("./cell_phone");
 
-},{"./address":82,"./cell_phone":91,"./company":92,"./internet":99,"./name":101,"./phone_number":107}],97:[function(require,module,exports){
+},{"./address":61,"./cell_phone":70,"./company":71,"./internet":78,"./name":80,"./phone_number":86}],76:[function(require,module,exports){
 module["exports"] = [
   "com",
   "info",
@@ -11647,27 +9304,27 @@ module["exports"] = [
   "at"
 ];
 
-},{}],98:[function(require,module,exports){
-arguments[4][65][0].apply(exports,arguments)
-},{"dup":65}],99:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":97,"./free_email":98,"dup":66}],100:[function(require,module,exports){
-arguments[4][69][0].apply(exports,arguments)
-},{"dup":69}],101:[function(require,module,exports){
-arguments[4][70][0].apply(exports,arguments)
-},{"./first_name":100,"./last_name":102,"./name":103,"./nobility_title_prefix":104,"./prefix":105,"dup":70}],102:[function(require,module,exports){
-arguments[4][71][0].apply(exports,arguments)
-},{"dup":71}],103:[function(require,module,exports){
-arguments[4][72][0].apply(exports,arguments)
-},{"dup":72}],104:[function(require,module,exports){
-arguments[4][73][0].apply(exports,arguments)
-},{"dup":73}],105:[function(require,module,exports){
+},{}],77:[function(require,module,exports){
+arguments[4][44][0].apply(exports,arguments)
+},{"dup":44}],78:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":76,"./free_email":77,"dup":45}],79:[function(require,module,exports){
+arguments[4][48][0].apply(exports,arguments)
+},{"dup":48}],80:[function(require,module,exports){
+arguments[4][49][0].apply(exports,arguments)
+},{"./first_name":79,"./last_name":81,"./name":82,"./nobility_title_prefix":83,"./prefix":84,"dup":49}],81:[function(require,module,exports){
+arguments[4][50][0].apply(exports,arguments)
+},{"dup":50}],82:[function(require,module,exports){
+arguments[4][51][0].apply(exports,arguments)
+},{"dup":51}],83:[function(require,module,exports){
+arguments[4][52][0].apply(exports,arguments)
+},{"dup":52}],84:[function(require,module,exports){
 module["exports"] = [
   "Dr.",
   "Prof. Dr."
 ];
 
-},{}],106:[function(require,module,exports){
+},{}],85:[function(require,module,exports){
 module["exports"] = [
   "01 #######",
   "01#######",
@@ -11679,9 +9336,9 @@ module["exports"] = [
   "+43 ########"
 ];
 
-},{}],107:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":106,"dup":76}],108:[function(require,module,exports){
+},{}],86:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":85,"dup":55}],87:[function(require,module,exports){
 module["exports"] = [
   "CH",
   "CH",
@@ -11695,19 +9352,19 @@ module["exports"] = [
   "VN"
 ];
 
-},{}],109:[function(require,module,exports){
+},{}],88:[function(require,module,exports){
 module["exports"] = [
   "Schweiz"
 ];
 
-},{}],110:[function(require,module,exports){
+},{}],89:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.country_code = require("./country_code");
 address.postcode = require("./postcode");
 address.default_country = require("./default_country");
 
-},{"./country_code":108,"./default_country":109,"./postcode":111}],111:[function(require,module,exports){
+},{"./country_code":87,"./default_country":88,"./postcode":90}],90:[function(require,module,exports){
 module["exports"] = [
   "1###",
   "2###",
@@ -11720,15 +9377,15 @@ module["exports"] = [
   "9###"
 ];
 
-},{}],112:[function(require,module,exports){
+},{}],91:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
 company.name = require("./name");
 
-},{"./name":113,"./suffix":114}],113:[function(require,module,exports){
-arguments[4][61][0].apply(exports,arguments)
-},{"dup":61}],114:[function(require,module,exports){
+},{"./name":92,"./suffix":93}],92:[function(require,module,exports){
+arguments[4][40][0].apply(exports,arguments)
+},{"dup":40}],93:[function(require,module,exports){
 module["exports"] = [
   "AG",
   "GmbH",
@@ -11740,7 +9397,7 @@ module["exports"] = [
   "Inc."
 ];
 
-},{}],115:[function(require,module,exports){
+},{}],94:[function(require,module,exports){
 var de_CH = {};
 module['exports'] = de_CH;
 de_CH.title = "German (Switzerland)";
@@ -11749,7 +9406,7 @@ de_CH.company = require("./company");
 de_CH.internet = require("./internet");
 de_CH.phone_number = require("./phone_number");
 
-},{"./address":110,"./company":112,"./internet":117,"./phone_number":119}],116:[function(require,module,exports){
+},{"./address":89,"./company":91,"./internet":96,"./phone_number":98}],95:[function(require,module,exports){
 module["exports"] = [
   "com",
   "net",
@@ -11762,12 +9419,12 @@ module["exports"] = [
   "ch"
 ];
 
-},{}],117:[function(require,module,exports){
+},{}],96:[function(require,module,exports){
 var internet = {};
 module['exports'] = internet;
 internet.domain_suffix = require("./domain_suffix");
 
-},{"./domain_suffix":116}],118:[function(require,module,exports){
+},{"./domain_suffix":95}],97:[function(require,module,exports){
 module["exports"] = [
   "0800 ### ###",
   "0800 ## ## ##",
@@ -11780,18 +9437,18 @@ module["exports"] = [
   "0041 79 ### ## ##"
 ];
 
-},{}],119:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":118,"dup":76}],120:[function(require,module,exports){
+},{}],98:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":97,"dup":55}],99:[function(require,module,exports){
 module["exports"] = [
   "#####",
   "####",
   "###"
 ];
 
-},{}],121:[function(require,module,exports){
-arguments[4][44][0].apply(exports,arguments)
-},{"dup":44}],122:[function(require,module,exports){
+},{}],100:[function(require,module,exports){
+arguments[4][23][0].apply(exports,arguments)
+},{"dup":23}],101:[function(require,module,exports){
 module["exports"] = [
   "North",
   "East",
@@ -11802,7 +9459,7 @@ module["exports"] = [
   "Port"
 ];
 
-},{}],123:[function(require,module,exports){
+},{}],102:[function(require,module,exports){
 module["exports"] = [
   "town",
   "ton",
@@ -11825,7 +9482,7 @@ module["exports"] = [
   "shire"
 ];
 
-},{}],124:[function(require,module,exports){
+},{}],103:[function(require,module,exports){
 module["exports"] = [
   "Afghanistan",
   "Albania",
@@ -12074,7 +9731,7 @@ module["exports"] = [
   "Zimbabwe"
 ];
 
-},{}],125:[function(require,module,exports){
+},{}],104:[function(require,module,exports){
 module["exports"] = [
   "AD",
   "AE",
@@ -12328,7 +9985,7 @@ module["exports"] = [
   "ZW"
 ];
 
-},{}],126:[function(require,module,exports){
+},{}],105:[function(require,module,exports){
 module["exports"] = [
   "Avon",
   "Bedfordshire",
@@ -12338,12 +9995,12 @@ module["exports"] = [
   "Cambridgeshire"
 ];
 
-},{}],127:[function(require,module,exports){
+},{}],106:[function(require,module,exports){
 module["exports"] = [
   "United States of America"
 ];
 
-},{}],128:[function(require,module,exports){
+},{}],107:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -12364,21 +10021,21 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":120,"./city":121,"./city_prefix":122,"./city_suffix":123,"./country":124,"./country_code":125,"./county":126,"./default_country":127,"./postcode":129,"./postcode_by_state":130,"./secondary_address":131,"./state":132,"./state_abbr":133,"./street_address":134,"./street_name":135,"./street_suffix":136,"./time_zone":137}],129:[function(require,module,exports){
+},{"./building_number":99,"./city":100,"./city_prefix":101,"./city_suffix":102,"./country":103,"./country_code":104,"./county":105,"./default_country":106,"./postcode":108,"./postcode_by_state":109,"./secondary_address":110,"./state":111,"./state_abbr":112,"./street_address":113,"./street_name":114,"./street_suffix":115,"./time_zone":116}],108:[function(require,module,exports){
 module["exports"] = [
   "#####",
   "#####-####"
 ];
 
-},{}],130:[function(require,module,exports){
-arguments[4][129][0].apply(exports,arguments)
-},{"dup":129}],131:[function(require,module,exports){
+},{}],109:[function(require,module,exports){
+arguments[4][108][0].apply(exports,arguments)
+},{"dup":108}],110:[function(require,module,exports){
 module["exports"] = [
   "Apt. ###",
   "Suite ###"
 ];
 
-},{}],132:[function(require,module,exports){
+},{}],111:[function(require,module,exports){
 module["exports"] = [
   "Alabama",
   "Alaska",
@@ -12432,7 +10089,7 @@ module["exports"] = [
   "Wyoming"
 ];
 
-},{}],133:[function(require,module,exports){
+},{}],112:[function(require,module,exports){
 module["exports"] = [
   "AL",
   "AK",
@@ -12486,18 +10143,18 @@ module["exports"] = [
   "WY"
 ];
 
-},{}],134:[function(require,module,exports){
+},{}],113:[function(require,module,exports){
 module["exports"] = [
   "#{building_number} #{street_name}"
 ];
 
-},{}],135:[function(require,module,exports){
+},{}],114:[function(require,module,exports){
 module["exports"] = [
   "#{Name.first_name} #{street_suffix}",
   "#{Name.last_name} #{street_suffix}"
 ];
 
-},{}],136:[function(require,module,exports){
+},{}],115:[function(require,module,exports){
 module["exports"] = [
   "Alley",
   "Avenue",
@@ -12726,7 +10383,7 @@ module["exports"] = [
   "Wells"
 ];
 
-},{}],137:[function(require,module,exports){
+},{}],116:[function(require,module,exports){
 module["exports"] = [
   "Pacific/Midway",
   "Pacific/Pago_Pago",
@@ -12873,20 +10530,20 @@ module["exports"] = [
   "Pacific/Apia"
 ];
 
-},{}],138:[function(require,module,exports){
+},{}],117:[function(require,module,exports){
 module["exports"] = [
   "#{Name.name}",
   "#{Company.name}"
 ];
 
-},{}],139:[function(require,module,exports){
+},{}],118:[function(require,module,exports){
 var app = {};
 module['exports'] = app;
 app.name = require("./name");
 app.version = require("./version");
 app.author = require("./author");
 
-},{"./author":138,"./name":140,"./version":141}],140:[function(require,module,exports){
+},{"./author":117,"./name":119,"./version":120}],119:[function(require,module,exports){
 module["exports"] = [
   "Redhold",
   "Treeflex",
@@ -12952,7 +10609,7 @@ module["exports"] = [
   "Keylex"
 ];
 
-},{}],141:[function(require,module,exports){
+},{}],120:[function(require,module,exports){
 module["exports"] = [
   "0.#.#",
   "0.##",
@@ -12961,7 +10618,7 @@ module["exports"] = [
   "#.#.#"
 ];
 
-},{}],142:[function(require,module,exports){
+},{}],121:[function(require,module,exports){
 module["exports"] = [
   "2011-10-12",
   "2012-11-12",
@@ -12969,7 +10626,7 @@ module["exports"] = [
   "2013-9-12"
 ];
 
-},{}],143:[function(require,module,exports){
+},{}],122:[function(require,module,exports){
 module["exports"] = [
   "1234-2121-1221-1211",
   "1212-1221-1121-1234",
@@ -12977,7 +10634,7 @@ module["exports"] = [
   "1228-1221-1221-1431"
 ];
 
-},{}],144:[function(require,module,exports){
+},{}],123:[function(require,module,exports){
 module["exports"] = [
   "visa",
   "mastercard",
@@ -12985,14 +10642,14 @@ module["exports"] = [
   "discover"
 ];
 
-},{}],145:[function(require,module,exports){
+},{}],124:[function(require,module,exports){
 var business = {};
 module['exports'] = business;
 business.credit_card_numbers = require("./credit_card_numbers");
 business.credit_card_expiry_dates = require("./credit_card_expiry_dates");
 business.credit_card_types = require("./credit_card_types");
 
-},{"./credit_card_expiry_dates":142,"./credit_card_numbers":143,"./credit_card_types":144}],146:[function(require,module,exports){
+},{"./credit_card_expiry_dates":121,"./credit_card_numbers":122,"./credit_card_types":123}],125:[function(require,module,exports){
 module["exports"] = [
   "###-###-####",
   "(###) ###-####",
@@ -13000,9 +10657,9 @@ module["exports"] = [
   "###.###.####"
 ];
 
-},{}],147:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":146,"dup":58}],148:[function(require,module,exports){
+},{}],126:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":125,"dup":37}],127:[function(require,module,exports){
 module["exports"] = [
   "red",
   "green",
@@ -13037,7 +10694,7 @@ module["exports"] = [
   "silver"
 ];
 
-},{}],149:[function(require,module,exports){
+},{}],128:[function(require,module,exports){
 module["exports"] = [
   "Books",
   "Movies",
@@ -13063,14 +10720,14 @@ module["exports"] = [
   "Industrial"
 ];
 
-},{}],150:[function(require,module,exports){
+},{}],129:[function(require,module,exports){
 var commerce = {};
 module['exports'] = commerce;
 commerce.color = require("./color");
 commerce.department = require("./department");
 commerce.product_name = require("./product_name");
 
-},{"./color":148,"./department":149,"./product_name":151}],151:[function(require,module,exports){
+},{"./color":127,"./department":128,"./product_name":130}],130:[function(require,module,exports){
 module["exports"] = {
   "adjective": [
     "Small",
@@ -13132,7 +10789,7 @@ module["exports"] = {
   ]
 };
 
-},{}],152:[function(require,module,exports){
+},{}],131:[function(require,module,exports){
 module["exports"] = [
   "Adaptive",
   "Advanced",
@@ -13236,7 +10893,7 @@ module["exports"] = [
   "Vision-oriented"
 ];
 
-},{}],153:[function(require,module,exports){
+},{}],132:[function(require,module,exports){
 module["exports"] = [
   "clicks-and-mortar",
   "value-added",
@@ -13305,7 +10962,7 @@ module["exports"] = [
   "rich"
 ];
 
-},{}],154:[function(require,module,exports){
+},{}],133:[function(require,module,exports){
 module["exports"] = [
   "synergies",
   "web-readiness",
@@ -13353,7 +11010,7 @@ module["exports"] = [
   "methodologies"
 ];
 
-},{}],155:[function(require,module,exports){
+},{}],134:[function(require,module,exports){
 module["exports"] = [
   "implement",
   "utilize",
@@ -13417,7 +11074,7 @@ module["exports"] = [
   "recontextualize"
 ];
 
-},{}],156:[function(require,module,exports){
+},{}],135:[function(require,module,exports){
 module["exports"] = [
   "24 hour",
   "24/7",
@@ -13522,7 +11179,7 @@ module["exports"] = [
   "zero tolerance"
 ];
 
-},{}],157:[function(require,module,exports){
+},{}],136:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
@@ -13534,14 +11191,14 @@ company.bs_adjective = require("./bs_adjective");
 company.bs_noun = require("./bs_noun");
 company.name = require("./name");
 
-},{"./adjective":152,"./bs_adjective":153,"./bs_noun":154,"./bs_verb":155,"./descriptor":156,"./name":158,"./noun":159,"./suffix":160}],158:[function(require,module,exports){
+},{"./adjective":131,"./bs_adjective":132,"./bs_noun":133,"./bs_verb":134,"./descriptor":135,"./name":137,"./noun":138,"./suffix":139}],137:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name}-#{Name.last_name}",
   "#{Name.last_name}, #{Name.last_name} and #{Name.last_name}"
 ];
 
-},{}],159:[function(require,module,exports){
+},{}],138:[function(require,module,exports){
 module["exports"] = [
   "ability",
   "access",
@@ -13649,7 +11306,7 @@ module["exports"] = [
   "workforce"
 ];
 
-},{}],160:[function(require,module,exports){
+},{}],139:[function(require,module,exports){
 module["exports"] = [
   "Inc",
   "and Sons",
@@ -13657,19 +11314,19 @@ module["exports"] = [
   "Group"
 ];
 
-},{}],161:[function(require,module,exports){
+},{}],140:[function(require,module,exports){
 module["exports"] = [
   "/34##-######-####L/",
   "/37##-######-####L/"
 ];
 
-},{}],162:[function(require,module,exports){
+},{}],141:[function(require,module,exports){
 module["exports"] = [
   "/30[0-5]#-######-###L/",
   "/368#-######-###L/"
 ];
 
-},{}],163:[function(require,module,exports){
+},{}],142:[function(require,module,exports){
 module["exports"] = [
   "/6011-####-####-###L/",
   "/65##-####-####-###L/",
@@ -13679,7 +11336,7 @@ module["exports"] = [
   "/64[4-9]#-62##-####-####-###L/"
 ];
 
-},{}],164:[function(require,module,exports){
+},{}],143:[function(require,module,exports){
 var credit_card = {};
 module['exports'] = credit_card;
 credit_card.visa = require("./visa");
@@ -13693,14 +11350,14 @@ credit_card.solo = require("./solo");
 credit_card.maestro = require("./maestro");
 credit_card.laser = require("./laser");
 
-},{"./american_express":161,"./diners_club":162,"./discover":163,"./jcb":165,"./laser":166,"./maestro":167,"./mastercard":168,"./solo":169,"./switch":170,"./visa":171}],165:[function(require,module,exports){
+},{"./american_express":140,"./diners_club":141,"./discover":142,"./jcb":144,"./laser":145,"./maestro":146,"./mastercard":147,"./solo":148,"./switch":149,"./visa":150}],144:[function(require,module,exports){
 module["exports"] = [
   "/3528-####-####-###L/",
   "/3529-####-####-###L/",
   "/35[3-8]#-####-####-###L/"
 ];
 
-},{}],166:[function(require,module,exports){
+},{}],145:[function(require,module,exports){
 module["exports"] = [
   "/6304###########L/",
   "/6706###########L/",
@@ -13712,46 +11369,46 @@ module["exports"] = [
   "/6709#########{5,6}L/"
 ];
 
-},{}],167:[function(require,module,exports){
+},{}],146:[function(require,module,exports){
 module["exports"] = [
   "/50#{9,16}L/",
   "/5[6-8]#{9,16}L/",
   "/56##{9,16}L/"
 ];
 
-},{}],168:[function(require,module,exports){
+},{}],147:[function(require,module,exports){
 module["exports"] = [
   "/5[1-5]##-####-####-###L/",
   "/6771-89##-####-###L/"
 ];
 
-},{}],169:[function(require,module,exports){
+},{}],148:[function(require,module,exports){
 module["exports"] = [
   "/6767-####-####-###L/",
   "/6767-####-####-####-#L/",
   "/6767-####-####-####-##L/"
 ];
 
-},{}],170:[function(require,module,exports){
+},{}],149:[function(require,module,exports){
 module["exports"] = [
   "/6759-####-####-###L/",
   "/6759-####-####-####-#L/",
   "/6759-####-####-####-##L/"
 ];
 
-},{}],171:[function(require,module,exports){
+},{}],150:[function(require,module,exports){
 module["exports"] = [
   "/4###########L/",
   "/4###-####-####-###L/"
 ];
 
-},{}],172:[function(require,module,exports){
+},{}],151:[function(require,module,exports){
 var date = {};
 module["exports"] = date;
 date.month = require("./month");
 date.weekday = require("./weekday");
 
-},{"./month":173,"./weekday":174}],173:[function(require,module,exports){
+},{"./month":152,"./weekday":153}],152:[function(require,module,exports){
 // Source: http://unicode.org/cldr/trac/browser/tags/release-27/common/main/en.xml#L1799
 module["exports"] = {
   wide: [
@@ -13816,7 +11473,7 @@ module["exports"] = {
   ]
 };
 
-},{}],174:[function(require,module,exports){
+},{}],153:[function(require,module,exports){
 // Source: http://unicode.org/cldr/trac/browser/tags/release-27/common/main/en.xml#L1847
 module["exports"] = {
   wide: [
@@ -13861,7 +11518,7 @@ module["exports"] = {
   ]
 };
 
-},{}],175:[function(require,module,exports){
+},{}],154:[function(require,module,exports){
 module["exports"] = [
   "Checking",
   "Savings",
@@ -13873,7 +11530,7 @@ module["exports"] = [
   "Personal Loan"
 ];
 
-},{}],176:[function(require,module,exports){
+},{}],155:[function(require,module,exports){
 module["exports"] = {
   "UAE Dirham": {
     "code": "AED",
@@ -14553,14 +12210,14 @@ module["exports"] = {
   }
 };
 
-},{}],177:[function(require,module,exports){
+},{}],156:[function(require,module,exports){
 var finance = {};
 module['exports'] = finance;
 finance.account_type = require("./account_type");
 finance.transaction_type = require("./transaction_type");
 finance.currency = require("./currency");
 
-},{"./account_type":175,"./currency":176,"./transaction_type":178}],178:[function(require,module,exports){
+},{"./account_type":154,"./currency":155,"./transaction_type":157}],157:[function(require,module,exports){
 module["exports"] = [
   "deposit",
   "withdrawal",
@@ -14568,7 +12225,7 @@ module["exports"] = [
   "invoice"
 ];
 
-},{}],179:[function(require,module,exports){
+},{}],158:[function(require,module,exports){
 module["exports"] = [
   "TCP",
   "HTTP",
@@ -14601,7 +12258,7 @@ module["exports"] = [
   "JBOD"
 ];
 
-},{}],180:[function(require,module,exports){
+},{}],159:[function(require,module,exports){
 module["exports"] = [
   "auxiliary",
   "primary",
@@ -14623,7 +12280,7 @@ module["exports"] = [
   "mobile"
 ];
 
-},{}],181:[function(require,module,exports){
+},{}],160:[function(require,module,exports){
 var hacker = {};
 module['exports'] = hacker;
 hacker.abbreviation = require("./abbreviation");
@@ -14632,7 +12289,7 @@ hacker.noun = require("./noun");
 hacker.verb = require("./verb");
 hacker.ingverb = require("./ingverb");
 
-},{"./abbreviation":179,"./adjective":180,"./ingverb":182,"./noun":183,"./verb":184}],182:[function(require,module,exports){
+},{"./abbreviation":158,"./adjective":159,"./ingverb":161,"./noun":162,"./verb":163}],161:[function(require,module,exports){
 module["exports"] = [
   "backing up",
   "bypassing",
@@ -14652,7 +12309,7 @@ module["exports"] = [
   "parsing"
 ];
 
-},{}],183:[function(require,module,exports){
+},{}],162:[function(require,module,exports){
 module["exports"] = [
   "driver",
   "protocol",
@@ -14680,7 +12337,7 @@ module["exports"] = [
   "matrix"
 ];
 
-},{}],184:[function(require,module,exports){
+},{}],163:[function(require,module,exports){
 module["exports"] = [
   "back up",
   "bypass",
@@ -14702,7 +12359,7 @@ module["exports"] = [
   "parse"
 ];
 
-},{}],185:[function(require,module,exports){
+},{}],164:[function(require,module,exports){
 var en = {};
 module['exports'] = en;
 en.title = "English";
@@ -14723,7 +12380,7 @@ en.app = require("./app");
 en.finance = require("./finance");
 en.date = require("./date");
 
-},{"./address":128,"./app":139,"./business":145,"./cell_phone":147,"./commerce":150,"./company":157,"./credit_card":164,"./date":172,"./finance":177,"./hacker":181,"./internet":189,"./lorem":190,"./name":194,"./phone_number":201,"./team":203}],186:[function(require,module,exports){
+},{"./address":107,"./app":118,"./business":124,"./cell_phone":126,"./commerce":129,"./company":136,"./credit_card":143,"./date":151,"./finance":156,"./hacker":160,"./internet":168,"./lorem":169,"./name":173,"./phone_number":180,"./team":182}],165:[function(require,module,exports){
 module["exports"] = [
   "https://s3.amazonaws.com/uifaces/faces/twitter/jarjan/128.jpg",
   "https://s3.amazonaws.com/uifaces/faces/twitter/mahdif/128.jpg",
@@ -15993,7 +13650,7 @@ module["exports"] = [
   "https://s3.amazonaws.com/uifaces/faces/twitter/areandacom/128.jpg"
 ];
 
-},{}],187:[function(require,module,exports){
+},{}],166:[function(require,module,exports){
 module["exports"] = [
   "com",
   "biz",
@@ -16003,22 +13660,22 @@ module["exports"] = [
   "org"
 ];
 
-},{}],188:[function(require,module,exports){
-arguments[4][65][0].apply(exports,arguments)
-},{"dup":65}],189:[function(require,module,exports){
+},{}],167:[function(require,module,exports){
+arguments[4][44][0].apply(exports,arguments)
+},{"dup":44}],168:[function(require,module,exports){
 var internet = {};
 module['exports'] = internet;
 internet.free_email = require("./free_email");
 internet.domain_suffix = require("./domain_suffix");
 internet.avatar_uri = require("./avatar_uri");
 
-},{"./avatar_uri":186,"./domain_suffix":187,"./free_email":188}],190:[function(require,module,exports){
+},{"./avatar_uri":165,"./domain_suffix":166,"./free_email":167}],169:[function(require,module,exports){
 var lorem = {};
 module['exports'] = lorem;
 lorem.words = require("./words");
 lorem.supplemental = require("./supplemental");
 
-},{"./supplemental":191,"./words":192}],191:[function(require,module,exports){
+},{"./supplemental":170,"./words":171}],170:[function(require,module,exports){
 module["exports"] = [
   "abbas",
   "abduco",
@@ -16862,9 +14519,9 @@ module["exports"] = [
   "xiphias"
 ];
 
-},{}],192:[function(require,module,exports){
-arguments[4][68][0].apply(exports,arguments)
-},{"dup":68}],193:[function(require,module,exports){
+},{}],171:[function(require,module,exports){
+arguments[4][47][0].apply(exports,arguments)
+},{"dup":47}],172:[function(require,module,exports){
 module["exports"] = [
   "Aaliyah",
   "Aaron",
@@ -19875,7 +17532,7 @@ module["exports"] = [
   "Zula"
 ];
 
-},{}],194:[function(require,module,exports){
+},{}],173:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
@@ -19885,7 +17542,7 @@ name.suffix = require("./suffix");
 name.title = require("./title");
 name.name = require("./name");
 
-},{"./first_name":193,"./last_name":195,"./name":196,"./prefix":197,"./suffix":198,"./title":199}],195:[function(require,module,exports){
+},{"./first_name":172,"./last_name":174,"./name":175,"./prefix":176,"./suffix":177,"./title":178}],174:[function(require,module,exports){
 module["exports"] = [
   "Abbott",
   "Abernathy",
@@ -20363,7 +18020,7 @@ module["exports"] = [
   "Zulauf"
 ];
 
-},{}],196:[function(require,module,exports){
+},{}],175:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{first_name} #{last_name}",
   "#{first_name} #{last_name} #{suffix}",
@@ -20373,7 +18030,7 @@ module["exports"] = [
   "#{first_name} #{last_name}"
 ];
 
-},{}],197:[function(require,module,exports){
+},{}],176:[function(require,module,exports){
 module["exports"] = [
   "Mr.",
   "Mrs.",
@@ -20382,7 +18039,7 @@ module["exports"] = [
   "Dr."
 ];
 
-},{}],198:[function(require,module,exports){
+},{}],177:[function(require,module,exports){
 module["exports"] = [
   "Jr.",
   "Sr.",
@@ -20397,7 +18054,7 @@ module["exports"] = [
   "DVM"
 ];
 
-},{}],199:[function(require,module,exports){
+},{}],178:[function(require,module,exports){
 module["exports"] = {
   "descriptor": [
     "Lead",
@@ -20491,7 +18148,7 @@ module["exports"] = {
   ]
 };
 
-},{}],200:[function(require,module,exports){
+},{}],179:[function(require,module,exports){
 module["exports"] = [
   "###-###-####",
   "(###) ###-####",
@@ -20515,9 +18172,9 @@ module["exports"] = [
   "###.###.#### x#####"
 ];
 
-},{}],201:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":200,"dup":76}],202:[function(require,module,exports){
+},{}],180:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":179,"dup":55}],181:[function(require,module,exports){
 module["exports"] = [
   "ants",
   "bats",
@@ -20588,30 +18245,30 @@ module["exports"] = [
   "druids"
 ];
 
-},{}],203:[function(require,module,exports){
+},{}],182:[function(require,module,exports){
 var team = {};
 module['exports'] = team;
 team.creature = require("./creature");
 team.name = require("./name");
 
-},{"./creature":202,"./name":204}],204:[function(require,module,exports){
+},{"./creature":181,"./name":183}],183:[function(require,module,exports){
 module["exports"] = [
   "#{Address.state} #{creature}"
 ];
 
-},{}],205:[function(require,module,exports){
+},{}],184:[function(require,module,exports){
 module["exports"] = [
   "####",
   "###",
   "##"
 ];
 
-},{}],206:[function(require,module,exports){
+},{}],185:[function(require,module,exports){
 module["exports"] = [
   "Australia"
 ];
 
-},{}],207:[function(require,module,exports){
+},{}],186:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.state_abbr = require("./state_abbr");
@@ -20621,7 +18278,7 @@ address.building_number = require("./building_number");
 address.street_suffix = require("./street_suffix");
 address.default_country = require("./default_country");
 
-},{"./building_number":205,"./default_country":206,"./postcode":208,"./state":209,"./state_abbr":210,"./street_suffix":211}],208:[function(require,module,exports){
+},{"./building_number":184,"./default_country":185,"./postcode":187,"./state":188,"./state_abbr":189,"./street_suffix":190}],187:[function(require,module,exports){
 module["exports"] = [
   "0###",
   "2###",
@@ -20632,7 +18289,7 @@ module["exports"] = [
   "7###"
 ];
 
-},{}],209:[function(require,module,exports){
+},{}],188:[function(require,module,exports){
 module["exports"] = [
   "New South Wales",
   "Queensland",
@@ -20644,7 +18301,7 @@ module["exports"] = [
   "Victoria"
 ];
 
-},{}],210:[function(require,module,exports){
+},{}],189:[function(require,module,exports){
 module["exports"] = [
   "NSW",
   "QLD",
@@ -20656,7 +18313,7 @@ module["exports"] = [
   "VIC"
 ];
 
-},{}],211:[function(require,module,exports){
+},{}],190:[function(require,module,exports){
 module["exports"] = [
   "Avenue",
   "Boulevard",
@@ -20697,12 +18354,12 @@ module["exports"] = [
   "Way"
 ];
 
-},{}],212:[function(require,module,exports){
+},{}],191:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
 
-},{"./suffix":213}],213:[function(require,module,exports){
+},{"./suffix":192}],192:[function(require,module,exports){
 module["exports"] = [
   "Pty Ltd",
   "and Sons",
@@ -20712,7 +18369,7 @@ module["exports"] = [
   "Partners"
 ];
 
-},{}],214:[function(require,module,exports){
+},{}],193:[function(require,module,exports){
 var en_AU = {};
 module['exports'] = en_AU;
 en_AU.title = "Australia (English)";
@@ -20722,7 +18379,7 @@ en_AU.internet = require("./internet");
 en_AU.address = require("./address");
 en_AU.phone_number = require("./phone_number");
 
-},{"./address":207,"./company":212,"./internet":216,"./name":218,"./phone_number":221}],215:[function(require,module,exports){
+},{"./address":186,"./company":191,"./internet":195,"./name":197,"./phone_number":200}],194:[function(require,module,exports){
 module["exports"] = [
   "com.au",
   "com",
@@ -20732,9 +18389,9 @@ module["exports"] = [
   "org"
 ];
 
-},{}],216:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":215,"dup":117}],217:[function(require,module,exports){
+},{}],195:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":194,"dup":96}],196:[function(require,module,exports){
 module["exports"] = [
   "William",
   "Jack",
@@ -20938,13 +18595,13 @@ module["exports"] = [
   "Kiara"
 ];
 
-},{}],218:[function(require,module,exports){
+},{}],197:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
 name.last_name = require("./last_name");
 
-},{"./first_name":217,"./last_name":219}],219:[function(require,module,exports){
+},{"./first_name":196,"./last_name":198}],198:[function(require,module,exports){
 module["exports"] = [
   "Smith",
   "Jones",
@@ -21234,7 +18891,7 @@ module["exports"] = [
   "Wolf"
 ];
 
-},{}],220:[function(require,module,exports){
+},{}],199:[function(require,module,exports){
 module["exports"] = [
   "0# #### ####",
   "+61 # #### ####",
@@ -21242,17 +18899,17 @@ module["exports"] = [
   "+61 4## ### ###"
 ];
 
-},{}],221:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":220,"dup":76}],222:[function(require,module,exports){
+},{}],200:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":199,"dup":55}],201:[function(require,module,exports){
 var en_BORK = {};
 module['exports'] = en_BORK;
 en_BORK.title = "Bork (English)";
 en_BORK.lorem = require("./lorem");
 
-},{"./lorem":223}],223:[function(require,module,exports){
-arguments[4][67][0].apply(exports,arguments)
-},{"./words":224,"dup":67}],224:[function(require,module,exports){
+},{"./lorem":202}],202:[function(require,module,exports){
+arguments[4][46][0].apply(exports,arguments)
+},{"./words":203,"dup":46}],203:[function(require,module,exports){
 module["exports"] = [
   "Boot",
   "I",
@@ -21359,12 +19016,12 @@ module["exports"] = [
   "zeere-a"
 ];
 
-},{}],225:[function(require,module,exports){
+},{}],204:[function(require,module,exports){
 module["exports"] = [
   "Canada"
 ];
 
-},{}],226:[function(require,module,exports){
+},{}],205:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.state = require("./state");
@@ -21372,12 +19029,12 @@ address.state_abbr = require("./state_abbr");
 address.default_country = require("./default_country");
 address.postcode = require('./postcode.js');
 
-},{"./default_country":225,"./postcode.js":227,"./state":228,"./state_abbr":229}],227:[function(require,module,exports){
+},{"./default_country":204,"./postcode.js":206,"./state":207,"./state_abbr":208}],206:[function(require,module,exports){
 module["exports"] = [
   "?#? #?#"
 ];
 
-},{}],228:[function(require,module,exports){
+},{}],207:[function(require,module,exports){
 module["exports"] = [
   "Alberta",
   "British Columbia",
@@ -21394,7 +19051,7 @@ module["exports"] = [
   "Yukon"
 ];
 
-},{}],229:[function(require,module,exports){
+},{}],208:[function(require,module,exports){
 module["exports"] = [
   "AB",
   "BC",
@@ -21411,7 +19068,7 @@ module["exports"] = [
   "YT"
 ];
 
-},{}],230:[function(require,module,exports){
+},{}],209:[function(require,module,exports){
 var en_CA = {};
 module['exports'] = en_CA;
 en_CA.title = "Canada (English)";
@@ -21419,7 +19076,7 @@ en_CA.address = require("./address");
 en_CA.internet = require("./internet");
 en_CA.phone_number = require("./phone_number");
 
-},{"./address":226,"./internet":233,"./phone_number":235}],231:[function(require,module,exports){
+},{"./address":205,"./internet":212,"./phone_number":214}],210:[function(require,module,exports){
 module["exports"] = [
   "ca",
   "com",
@@ -21430,16 +19087,16 @@ module["exports"] = [
   "org"
 ];
 
-},{}],232:[function(require,module,exports){
+},{}],211:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.ca",
   "hotmail.com"
 ];
 
-},{}],233:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":231,"./free_email":232,"dup":66}],234:[function(require,module,exports){
+},{}],212:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":210,"./free_email":211,"dup":45}],213:[function(require,module,exports){
 module["exports"] = [
   "###-###-####",
   "(###)###-####",
@@ -21459,9 +19116,9 @@ module["exports"] = [
   "###.###.#### x#####"
 ];
 
-},{}],235:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":234,"dup":76}],236:[function(require,module,exports){
+},{}],214:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":213,"dup":55}],215:[function(require,module,exports){
 module["exports"] = [
   "Avon",
   "Bedfordshire",
@@ -21535,7 +19192,7 @@ module["exports"] = [
   "Worcestershire"
 ];
 
-},{}],237:[function(require,module,exports){
+},{}],216:[function(require,module,exports){
 module["exports"] = [
   "England",
   "Scotland",
@@ -21543,16 +19200,16 @@ module["exports"] = [
   "Northern Ireland"
 ];
 
-},{}],238:[function(require,module,exports){
+},{}],217:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.county = require("./county");
 address.uk_country = require("./uk_country");
 address.default_country = require("./default_country");
 
-},{"./county":236,"./default_country":237,"./uk_country":239}],239:[function(require,module,exports){
-arguments[4][237][0].apply(exports,arguments)
-},{"dup":237}],240:[function(require,module,exports){
+},{"./county":215,"./default_country":216,"./uk_country":218}],218:[function(require,module,exports){
+arguments[4][216][0].apply(exports,arguments)
+},{"dup":216}],219:[function(require,module,exports){
 module["exports"] = [
   "074## ######",
   "075## ######",
@@ -21562,9 +19219,9 @@ module["exports"] = [
   "079## ######"
 ];
 
-},{}],241:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":240,"dup":58}],242:[function(require,module,exports){
+},{}],220:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":219,"dup":37}],221:[function(require,module,exports){
 var en_GB = {};
 module['exports'] = en_GB;
 en_GB.title = "Great Britain (English)";
@@ -21573,7 +19230,7 @@ en_GB.internet = require("./internet");
 en_GB.phone_number = require("./phone_number");
 en_GB.cell_phone = require("./cell_phone");
 
-},{"./address":238,"./cell_phone":241,"./internet":244,"./phone_number":246}],243:[function(require,module,exports){
+},{"./address":217,"./cell_phone":220,"./internet":223,"./phone_number":225}],222:[function(require,module,exports){
 module["exports"] = [
   "co.uk",
   "com",
@@ -21582,9 +19239,9 @@ module["exports"] = [
   "name"
 ];
 
-},{}],244:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":243,"dup":117}],245:[function(require,module,exports){
+},{}],223:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":222,"dup":96}],224:[function(require,module,exports){
 module["exports"] = [
   "01#### #####",
   "01### ######",
@@ -21603,9 +19260,9 @@ module["exports"] = [
   "0800 ######"
 ];
 
-},{}],246:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":245,"dup":76}],247:[function(require,module,exports){
+},{}],225:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":224,"dup":55}],226:[function(require,module,exports){
 module["exports"] = [
   "Carlow",
   "Cavan",
@@ -21635,18 +19292,18 @@ module["exports"] = [
   "Wicklow"
 ];
 
-},{}],248:[function(require,module,exports){
+},{}],227:[function(require,module,exports){
 module["exports"] = [
   "Ireland"
 ];
 
-},{}],249:[function(require,module,exports){
+},{}],228:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.county = require("./county");
 address.default_country = require("./default_country");
 
-},{"./county":247,"./default_country":248}],250:[function(require,module,exports){
+},{"./county":226,"./default_country":227}],229:[function(require,module,exports){
 module["exports"] = [
   "082 ### ####",
   "083 ### ####",
@@ -21656,9 +19313,9 @@ module["exports"] = [
   "089 ### ####"
 ];
 
-},{}],251:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":250,"dup":58}],252:[function(require,module,exports){
+},{}],230:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":229,"dup":37}],231:[function(require,module,exports){
 var en_IE = {};
 module['exports'] = en_IE;
 en_IE.title = "Ireland (English)";
@@ -21667,7 +19324,7 @@ en_IE.internet = require("./internet");
 en_IE.phone_number = require("./phone_number");
 en_IE.cell_phone = require("./cell_phone");
 
-},{"./address":249,"./cell_phone":251,"./internet":254,"./phone_number":256}],253:[function(require,module,exports){
+},{"./address":228,"./cell_phone":230,"./internet":233,"./phone_number":235}],232:[function(require,module,exports){
 module["exports"] = [
   "ie",
   "com",
@@ -21676,9 +19333,9 @@ module["exports"] = [
   "eu"
 ];
 
-},{}],254:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":253,"dup":117}],255:[function(require,module,exports){
+},{}],233:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":232,"dup":96}],234:[function(require,module,exports){
 module["exports"] = [
   "01 #######",
   "021 #######",
@@ -21731,9 +19388,9 @@ module["exports"] = [
   "099 #######"
 ];
 
-},{}],256:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":255,"dup":76}],257:[function(require,module,exports){
+},{}],235:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":234,"dup":55}],236:[function(require,module,exports){
 module["exports"] = [
   "India",
   "Indian Republic",
@@ -21741,7 +19398,7 @@ module["exports"] = [
   "Hindustan"
 ];
 
-},{}],258:[function(require,module,exports){
+},{}],237:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.postcode = require("./postcode");
@@ -21749,9 +19406,9 @@ address.state = require("./state");
 address.state_abbr = require("./state_abbr");
 address.default_country = require("./default_country");
 
-},{"./default_country":257,"./postcode":259,"./state":260,"./state_abbr":261}],259:[function(require,module,exports){
-arguments[4][227][0].apply(exports,arguments)
-},{"dup":227}],260:[function(require,module,exports){
+},{"./default_country":236,"./postcode":238,"./state":239,"./state_abbr":240}],238:[function(require,module,exports){
+arguments[4][206][0].apply(exports,arguments)
+},{"dup":206}],239:[function(require,module,exports){
 module["exports"] = [
   "Andra Pradesh",
   "Arunachal Pradesh",
@@ -21790,7 +19447,7 @@ module["exports"] = [
   "Pondicherry"
 ];
 
-},{}],261:[function(require,module,exports){
+},{}],240:[function(require,module,exports){
 module["exports"] = [
   "AP",
   "AR",
@@ -21829,9 +19486,9 @@ module["exports"] = [
   "PY"
 ];
 
-},{}],262:[function(require,module,exports){
-arguments[4][212][0].apply(exports,arguments)
-},{"./suffix":263,"dup":212}],263:[function(require,module,exports){
+},{}],241:[function(require,module,exports){
+arguments[4][191][0].apply(exports,arguments)
+},{"./suffix":242,"dup":191}],242:[function(require,module,exports){
 module["exports"] = [
   "Pvt Ltd",
   "Limited",
@@ -21842,7 +19499,7 @@ module["exports"] = [
   "Brothers"
 ];
 
-},{}],264:[function(require,module,exports){
+},{}],243:[function(require,module,exports){
 var en_IND = {};
 module['exports'] = en_IND;
 en_IND.title = "India (English)";
@@ -21852,7 +19509,7 @@ en_IND.internet = require("./internet");
 en_IND.company = require("./company");
 en_IND.phone_number = require("./phone_number");
 
-},{"./address":258,"./company":262,"./internet":267,"./name":269,"./phone_number":272}],265:[function(require,module,exports){
+},{"./address":237,"./company":241,"./internet":246,"./name":248,"./phone_number":251}],244:[function(require,module,exports){
 module["exports"] = [
   "in",
   "com",
@@ -21864,16 +19521,16 @@ module["exports"] = [
   "co.in"
 ];
 
-},{}],266:[function(require,module,exports){
+},{}],245:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.co.in",
   "hotmail.com"
 ];
 
-},{}],267:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":265,"./free_email":266,"dup":66}],268:[function(require,module,exports){
+},{}],246:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":244,"./free_email":245,"dup":45}],247:[function(require,module,exports){
 module["exports"] = [
   "Aadrika",
   "Aanandinii",
@@ -22639,9 +20296,9 @@ module["exports"] = [
   "Yogesh"
 ];
 
-},{}],269:[function(require,module,exports){
-arguments[4][218][0].apply(exports,arguments)
-},{"./first_name":268,"./last_name":270,"dup":218}],270:[function(require,module,exports){
+},{}],248:[function(require,module,exports){
+arguments[4][197][0].apply(exports,arguments)
+},{"./first_name":247,"./last_name":249,"dup":197}],249:[function(require,module,exports){
 module["exports"] = [
   "Abbott",
   "Achari",
@@ -22734,29 +20391,29 @@ module["exports"] = [
   "Verma"
 ];
 
-},{}],271:[function(require,module,exports){
+},{}],250:[function(require,module,exports){
 module["exports"] = [
   "+91###-###-####",
   "+91##########",
   "+91-###-#######"
 ];
 
-},{}],272:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":271,"dup":76}],273:[function(require,module,exports){
+},{}],251:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":250,"dup":55}],252:[function(require,module,exports){
 module["exports"] = [
   "United States",
   "United States of America",
   "USA"
 ];
 
-},{}],274:[function(require,module,exports){
+},{}],253:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.default_country = require("./default_country");
 address.postcode_by_state = require("./postcode_by_state");
 
-},{"./default_country":273,"./postcode_by_state":275}],275:[function(require,module,exports){
+},{"./default_country":252,"./postcode_by_state":254}],254:[function(require,module,exports){
 module["exports"] = {
   "AL": "350##",
   "AK": "995##",
@@ -22812,7 +20469,7 @@ module["exports"] = {
   "WY": "831##"
 };
 
-},{}],276:[function(require,module,exports){
+},{}],255:[function(require,module,exports){
 var en_US = {};
 module['exports'] = en_US;
 en_US.title = "United States (English)";
@@ -22820,7 +20477,7 @@ en_US.internet = require("./internet");
 en_US.address = require("./address");
 en_US.phone_number = require("./phone_number");
 
-},{"./address":274,"./internet":278,"./phone_number":281}],277:[function(require,module,exports){
+},{"./address":253,"./internet":257,"./phone_number":260}],256:[function(require,module,exports){
 module["exports"] = [
   "com",
   "us",
@@ -22831,9 +20488,9 @@ module["exports"] = [
   "org"
 ];
 
-},{}],278:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":277,"dup":117}],279:[function(require,module,exports){
+},{}],257:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":256,"dup":96}],258:[function(require,module,exports){
 module["exports"] = [
   "201",
   "202",
@@ -23120,22 +20777,22 @@ module["exports"] = [
   "989"
 ];
 
-},{}],280:[function(require,module,exports){
-arguments[4][279][0].apply(exports,arguments)
-},{"dup":279}],281:[function(require,module,exports){
+},{}],259:[function(require,module,exports){
+arguments[4][258][0].apply(exports,arguments)
+},{"dup":258}],260:[function(require,module,exports){
 var phone_number = {};
 module['exports'] = phone_number;
 phone_number.area_code = require("./area_code");
 phone_number.exchange_code = require("./exchange_code");
 
-},{"./area_code":279,"./exchange_code":280}],282:[function(require,module,exports){
-arguments[4][205][0].apply(exports,arguments)
-},{"dup":205}],283:[function(require,module,exports){
+},{"./area_code":258,"./exchange_code":259}],261:[function(require,module,exports){
+arguments[4][184][0].apply(exports,arguments)
+},{"dup":184}],262:[function(require,module,exports){
 module["exports"] = [
   "#{city_prefix}"
 ];
 
-},{}],284:[function(require,module,exports){
+},{}],263:[function(require,module,exports){
 module["exports"] = [
   "Bondi",
   "Burleigh Heads",
@@ -23151,9 +20808,9 @@ module["exports"] = [
   "Yarra Valley"
 ];
 
-},{}],285:[function(require,module,exports){
-arguments[4][206][0].apply(exports,arguments)
-},{"dup":206}],286:[function(require,module,exports){
+},{}],264:[function(require,module,exports){
+arguments[4][185][0].apply(exports,arguments)
+},{"dup":185}],265:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.street_root = require("./street_root");
@@ -23168,9 +20825,9 @@ address.building_number = require("./building_number");
 address.street_suffix = require("./street_suffix");
 address.default_country = require("./default_country");
 
-},{"./building_number":282,"./city":283,"./city_prefix":284,"./default_country":285,"./postcode":287,"./region":288,"./state":289,"./state_abbr":290,"./street_name":291,"./street_root":292,"./street_suffix":293}],287:[function(require,module,exports){
-arguments[4][208][0].apply(exports,arguments)
-},{"dup":208}],288:[function(require,module,exports){
+},{"./building_number":261,"./city":262,"./city_prefix":263,"./default_country":264,"./postcode":266,"./region":267,"./state":268,"./state_abbr":269,"./street_name":270,"./street_root":271,"./street_suffix":272}],266:[function(require,module,exports){
+arguments[4][187][0].apply(exports,arguments)
+},{"dup":187}],267:[function(require,module,exports){
 module["exports"] = [
   "South East Queensland",
   "Wide Bay Burnett",
@@ -23181,13 +20838,13 @@ module["exports"] = [
   "Barossa"
 ];
 
-},{}],289:[function(require,module,exports){
-arguments[4][209][0].apply(exports,arguments)
-},{"dup":209}],290:[function(require,module,exports){
-arguments[4][210][0].apply(exports,arguments)
-},{"dup":210}],291:[function(require,module,exports){
-arguments[4][55][0].apply(exports,arguments)
-},{"dup":55}],292:[function(require,module,exports){
+},{}],268:[function(require,module,exports){
+arguments[4][188][0].apply(exports,arguments)
+},{"dup":188}],269:[function(require,module,exports){
+arguments[4][189][0].apply(exports,arguments)
+},{"dup":189}],270:[function(require,module,exports){
+arguments[4][34][0].apply(exports,arguments)
+},{"dup":34}],271:[function(require,module,exports){
 module["exports"] = [
   "Ramsay Street",
   "Bonnie Doon",
@@ -23195,13 +20852,13 @@ module["exports"] = [
   "Queen Street"
 ];
 
-},{}],293:[function(require,module,exports){
-arguments[4][211][0].apply(exports,arguments)
-},{"dup":211}],294:[function(require,module,exports){
-arguments[4][212][0].apply(exports,arguments)
-},{"./suffix":295,"dup":212}],295:[function(require,module,exports){
-arguments[4][213][0].apply(exports,arguments)
-},{"dup":213}],296:[function(require,module,exports){
+},{}],272:[function(require,module,exports){
+arguments[4][190][0].apply(exports,arguments)
+},{"dup":190}],273:[function(require,module,exports){
+arguments[4][191][0].apply(exports,arguments)
+},{"./suffix":274,"dup":191}],274:[function(require,module,exports){
+arguments[4][192][0].apply(exports,arguments)
+},{"dup":192}],275:[function(require,module,exports){
 var en_au_ocker = {};
 module['exports'] = en_au_ocker;
 en_au_ocker.title = "Australia Ocker (English)";
@@ -23211,11 +20868,11 @@ en_au_ocker.internet = require("./internet");
 en_au_ocker.address = require("./address");
 en_au_ocker.phone_number = require("./phone_number");
 
-},{"./address":286,"./company":294,"./internet":298,"./name":300,"./phone_number":304}],297:[function(require,module,exports){
-arguments[4][215][0].apply(exports,arguments)
-},{"dup":215}],298:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":297,"dup":117}],299:[function(require,module,exports){
+},{"./address":265,"./company":273,"./internet":277,"./name":279,"./phone_number":283}],276:[function(require,module,exports){
+arguments[4][194][0].apply(exports,arguments)
+},{"dup":194}],277:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":276,"dup":96}],278:[function(require,module,exports){
 module["exports"] = [
   "Charlotte",
   "Ava",
@@ -23323,14 +20980,14 @@ module["exports"] = [
   "Sean"
 ];
 
-},{}],300:[function(require,module,exports){
+},{}],279:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
 name.last_name = require("./last_name");
 name.ocker_first_name = require("./ocker_first_name");
 
-},{"./first_name":299,"./last_name":301,"./ocker_first_name":302}],301:[function(require,module,exports){
+},{"./first_name":278,"./last_name":280,"./ocker_first_name":281}],280:[function(require,module,exports){
 module["exports"] = [
   "Smith",
   "Jones",
@@ -23358,7 +21015,7 @@ module["exports"] = [
   "LeQuesne"
 ];
 
-},{}],302:[function(require,module,exports){
+},{}],281:[function(require,module,exports){
 module["exports"] = [
   "Bazza",
   "Bluey",
@@ -23368,11 +21025,11 @@ module["exports"] = [
   "Shazza"
 ];
 
-},{}],303:[function(require,module,exports){
-arguments[4][220][0].apply(exports,arguments)
-},{"dup":220}],304:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":303,"dup":76}],305:[function(require,module,exports){
+},{}],282:[function(require,module,exports){
+arguments[4][199][0].apply(exports,arguments)
+},{"dup":199}],283:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":282,"dup":55}],284:[function(require,module,exports){
 module["exports"] = [
   " s/n.",
   ", #",
@@ -23381,9 +21038,9 @@ module["exports"] = [
   " ##"
 ];
 
-},{}],306:[function(require,module,exports){
-arguments[4][283][0].apply(exports,arguments)
-},{"dup":283}],307:[function(require,module,exports){
+},{}],285:[function(require,module,exports){
+arguments[4][262][0].apply(exports,arguments)
+},{"dup":262}],286:[function(require,module,exports){
 module["exports"] = [
   "Parla",
   "Telde",
@@ -23516,7 +21173,7 @@ module["exports"] = [
   "Inca"
 ];
 
-},{}],308:[function(require,module,exports){
+},{}],287:[function(require,module,exports){
 module["exports"] = [
   "Afganistán",
   "Albania",
@@ -23700,12 +21357,12 @@ module["exports"] = [
   "Zimbabwe"
 ];
 
-},{}],309:[function(require,module,exports){
+},{}],288:[function(require,module,exports){
 module["exports"] = [
   "España"
 ];
 
-},{}],310:[function(require,module,exports){
+},{}],289:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -23723,12 +21380,12 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":305,"./city":306,"./city_prefix":307,"./country":308,"./default_country":309,"./postcode":311,"./province":312,"./secondary_address":313,"./state":314,"./state_abbr":315,"./street_address":316,"./street_name":317,"./street_suffix":318,"./time_zone":319}],311:[function(require,module,exports){
+},{"./building_number":284,"./city":285,"./city_prefix":286,"./country":287,"./default_country":288,"./postcode":290,"./province":291,"./secondary_address":292,"./state":293,"./state_abbr":294,"./street_address":295,"./street_name":296,"./street_suffix":297,"./time_zone":298}],290:[function(require,module,exports){
 module["exports"] = [
   "#####"
 ];
 
-},{}],312:[function(require,module,exports){
+},{}],291:[function(require,module,exports){
 module["exports"] = [
   "Álava",
   "Albacete",
@@ -23782,13 +21439,13 @@ module["exports"] = [
   "Zaragoza"
 ];
 
-},{}],313:[function(require,module,exports){
+},{}],292:[function(require,module,exports){
 module["exports"] = [
   "Esc. ###",
   "Puerta ###"
 ];
 
-},{}],314:[function(require,module,exports){
+},{}],293:[function(require,module,exports){
 module["exports"] = [
   "Andalucía",
   "Aragón",
@@ -23809,7 +21466,7 @@ module["exports"] = [
   "Región de Murcia"
 ];
 
-},{}],315:[function(require,module,exports){
+},{}],294:[function(require,module,exports){
 module["exports"] = [
   "And",
   "Ara",
@@ -23830,19 +21487,19 @@ module["exports"] = [
   "Mur"
 ];
 
-},{}],316:[function(require,module,exports){
+},{}],295:[function(require,module,exports){
 module["exports"] = [
   "#{street_name}#{building_number}",
   "#{street_name}#{building_number} #{secondary_address}"
 ];
 
-},{}],317:[function(require,module,exports){
+},{}],296:[function(require,module,exports){
 module["exports"] = [
   "#{street_suffix} #{Name.first_name}",
   "#{street_suffix} #{Name.first_name} #{Name.last_name}"
 ];
 
-},{}],318:[function(require,module,exports){
+},{}],297:[function(require,module,exports){
 module["exports"] = [
   "Aldea",
   "Apartamento",
@@ -23916,7 +21573,7 @@ module["exports"] = [
   "Vía Pública"
 ];
 
-},{}],319:[function(require,module,exports){
+},{}],298:[function(require,module,exports){
 module["exports"] = [
   "Pacífico/Midway",
   "Pacífico/Pago_Pago",
@@ -24063,7 +21720,7 @@ module["exports"] = [
   "Pacífico/Apia"
 ];
 
-},{}],320:[function(require,module,exports){
+},{}],299:[function(require,module,exports){
 module["exports"] = [
   "6##-###-###",
   "6##.###.###",
@@ -24071,9 +21728,9 @@ module["exports"] = [
   "6########"
 ];
 
-},{}],321:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":320,"dup":58}],322:[function(require,module,exports){
+},{}],300:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":299,"dup":37}],301:[function(require,module,exports){
 module["exports"] = [
   "Adaptativo",
   "Avanzado",
@@ -24162,7 +21819,7 @@ module["exports"] = [
   "Visionario"
 ];
 
-},{}],323:[function(require,module,exports){
+},{}],302:[function(require,module,exports){
 module["exports"] = [
   "24 horas",
   "24/7",
@@ -24247,7 +21904,7 @@ module["exports"] = [
   "tolerancia cero"
 ];
 
-},{}],324:[function(require,module,exports){
+},{}],303:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
@@ -24256,7 +21913,7 @@ company.descriptor = require("./descriptor");
 company.adjective = require("./adjective");
 company.name = require("./name");
 
-},{"./adjective":322,"./descriptor":323,"./name":325,"./noun":326,"./suffix":327}],325:[function(require,module,exports){
+},{"./adjective":301,"./descriptor":302,"./name":304,"./noun":305,"./suffix":306}],304:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name} y #{Name.last_name}",
@@ -24264,7 +21921,7 @@ module["exports"] = [
   "#{Name.last_name}, #{Name.last_name} y #{Name.last_name} Asociados"
 ];
 
-},{}],326:[function(require,module,exports){
+},{}],305:[function(require,module,exports){
 module["exports"] = [
   "habilidad",
   "acceso",
@@ -24361,7 +22018,7 @@ module["exports"] = [
   "fuerza de trabajo"
 ];
 
-},{}],327:[function(require,module,exports){
+},{}],306:[function(require,module,exports){
 module["exports"] = [
   "S.L.",
   "e Hijos",
@@ -24369,7 +22026,7 @@ module["exports"] = [
   "Hermanos"
 ];
 
-},{}],328:[function(require,module,exports){
+},{}],307:[function(require,module,exports){
 var es = {};
 module['exports'] = es;
 es.title = "Spanish";
@@ -24380,7 +22037,7 @@ es.name = require("./name");
 es.phone_number = require("./phone_number");
 es.cell_phone = require("./cell_phone");
 
-},{"./address":310,"./cell_phone":321,"./company":324,"./internet":331,"./name":333,"./phone_number":340}],329:[function(require,module,exports){
+},{"./address":289,"./cell_phone":300,"./company":303,"./internet":310,"./name":312,"./phone_number":319}],308:[function(require,module,exports){
 module["exports"] = [
   "com",
   "es",
@@ -24389,11 +22046,11 @@ module["exports"] = [
   "org"
 ];
 
-},{}],330:[function(require,module,exports){
-arguments[4][65][0].apply(exports,arguments)
-},{"dup":65}],331:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":329,"./free_email":330,"dup":66}],332:[function(require,module,exports){
+},{}],309:[function(require,module,exports){
+arguments[4][44][0].apply(exports,arguments)
+},{"dup":44}],310:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":308,"./free_email":309,"dup":45}],311:[function(require,module,exports){
 module["exports"] = [
   "Adán",
   "Agustín",
@@ -24609,9 +22266,9 @@ module["exports"] = [
   "Yolanda"
 ];
 
-},{}],333:[function(require,module,exports){
-arguments[4][194][0].apply(exports,arguments)
-},{"./first_name":332,"./last_name":334,"./name":335,"./prefix":336,"./suffix":337,"./title":338,"dup":194}],334:[function(require,module,exports){
+},{}],312:[function(require,module,exports){
+arguments[4][173][0].apply(exports,arguments)
+},{"./first_name":311,"./last_name":313,"./name":314,"./prefix":315,"./suffix":316,"./title":317,"dup":173}],313:[function(require,module,exports){
 module["exports"] = [
   "Abeyta",
   "Abrego",
@@ -25253,7 +22910,7 @@ module["exports"] = [
   "Zúñiga"
 ];
 
-},{}],335:[function(require,module,exports){
+},{}],314:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{first_name} #{last_name} #{last_name}",
   "#{first_name} #{last_name} #{last_name}",
@@ -25262,16 +22919,16 @@ module["exports"] = [
   "#{first_name} #{last_name} #{last_name}"
 ];
 
-},{}],336:[function(require,module,exports){
+},{}],315:[function(require,module,exports){
 module["exports"] = [
   "Sr.",
   "Sra.",
   "Sta."
 ];
 
-},{}],337:[function(require,module,exports){
-arguments[4][198][0].apply(exports,arguments)
-},{"dup":198}],338:[function(require,module,exports){
+},{}],316:[function(require,module,exports){
+arguments[4][177][0].apply(exports,arguments)
+},{"dup":177}],317:[function(require,module,exports){
 module["exports"] = {
   "descriptor": [
     "Jefe",
@@ -25363,7 +23020,7 @@ module["exports"] = {
   ]
 };
 
-},{}],339:[function(require,module,exports){
+},{}],318:[function(require,module,exports){
 module["exports"] = [
   "9##-###-###",
   "9##.###.###",
@@ -25371,9 +23028,9 @@ module["exports"] = [
   "9########"
 ];
 
-},{}],340:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":339,"dup":76}],341:[function(require,module,exports){
+},{}],319:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":318,"dup":55}],320:[function(require,module,exports){
 module["exports"] = [
   " s/n.",
   ", #",
@@ -25384,9 +23041,9 @@ module["exports"] = [
   " ####"
 ];
 
-},{}],342:[function(require,module,exports){
-arguments[4][283][0].apply(exports,arguments)
-},{"dup":283}],343:[function(require,module,exports){
+},{}],321:[function(require,module,exports){
+arguments[4][262][0].apply(exports,arguments)
+},{"dup":262}],322:[function(require,module,exports){
 module["exports"] = [
   "Aguascalientes",
   "Apodaca",
@@ -25520,9 +23177,9 @@ module["exports"] = [
   "Zitacuaro"
 ];
 
-},{}],344:[function(require,module,exports){
-arguments[4][123][0].apply(exports,arguments)
-},{"dup":123}],345:[function(require,module,exports){
+},{}],323:[function(require,module,exports){
+arguments[4][102][0].apply(exports,arguments)
+},{"dup":102}],324:[function(require,module,exports){
 module["exports"] = [
   "Afganistán",
   "Albania",
@@ -25706,12 +23363,12 @@ module["exports"] = [
   "Zimbabwe"
 ];
 
-},{}],346:[function(require,module,exports){
+},{}],325:[function(require,module,exports){
 module["exports"] = [
   "México"
 ];
 
-},{}],347:[function(require,module,exports){
+},{}],326:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -25729,16 +23386,16 @@ address.street = require("./street");
 address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
-},{"./building_number":341,"./city":342,"./city_prefix":343,"./city_suffix":344,"./country":345,"./default_country":346,"./postcode":348,"./secondary_address":349,"./state":350,"./state_abbr":351,"./street":352,"./street_address":353,"./street_name":354,"./street_suffix":355,"./time_zone":356}],348:[function(require,module,exports){
-arguments[4][311][0].apply(exports,arguments)
-},{"dup":311}],349:[function(require,module,exports){
+},{"./building_number":320,"./city":321,"./city_prefix":322,"./city_suffix":323,"./country":324,"./default_country":325,"./postcode":327,"./secondary_address":328,"./state":329,"./state_abbr":330,"./street":331,"./street_address":332,"./street_name":333,"./street_suffix":334,"./time_zone":335}],327:[function(require,module,exports){
+arguments[4][290][0].apply(exports,arguments)
+},{"dup":290}],328:[function(require,module,exports){
 module["exports"] = [
   "Esc. ###",
   "Puerta ###",
   "Edificio #"
 ];
 
-},{}],350:[function(require,module,exports){
+},{}],329:[function(require,module,exports){
 module["exports"] = [
   "Aguascalientes",
   "Baja California Norte",
@@ -25773,7 +23430,7 @@ module["exports"] = [
   "Zacatecas"
 ];
 
-},{}],351:[function(require,module,exports){
+},{}],330:[function(require,module,exports){
 module["exports"] = [
   "AS",
   "BC",
@@ -25809,7 +23466,7 @@ module["exports"] = [
   "ZS"
 ];
 
-},{}],352:[function(require,module,exports){
+},{}],331:[function(require,module,exports){
 module["exports"] = [
 	"20 de Noviembre",
 	"Cinco de Mayo",
@@ -25851,9 +23508,9 @@ module["exports"] = [
 	"Jalisco",
 	"Avena"
 ];
-},{}],353:[function(require,module,exports){
-arguments[4][316][0].apply(exports,arguments)
-},{"dup":316}],354:[function(require,module,exports){
+},{}],332:[function(require,module,exports){
+arguments[4][295][0].apply(exports,arguments)
+},{"dup":295}],333:[function(require,module,exports){
 module["exports"] = [
   "#{street_suffix} #{Name.first_name}",
   "#{street_suffix} #{Name.first_name} #{Name.last_name}",
@@ -25864,9 +23521,9 @@ module["exports"] = [
 
 ];
 
-},{}],355:[function(require,module,exports){
-arguments[4][318][0].apply(exports,arguments)
-},{"dup":318}],356:[function(require,module,exports){
+},{}],334:[function(require,module,exports){
+arguments[4][297][0].apply(exports,arguments)
+},{"dup":297}],335:[function(require,module,exports){
 module["exports"] = [
   "Pacífico/Midway",
   "Pacífico/Pago_Pago",
@@ -26012,7 +23669,7 @@ module["exports"] = [
   "Pacífico/Apia"
 ];
 
-},{}],357:[function(require,module,exports){
+},{}],336:[function(require,module,exports){
 module["exports"] = [
   "5##-###-###",
   "5##.###.###",
@@ -26020,9 +23677,9 @@ module["exports"] = [
   "5########"
 ];
 
-},{}],358:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":357,"dup":58}],359:[function(require,module,exports){
+},{}],337:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":336,"dup":37}],338:[function(require,module,exports){
 module["exports"] = [
    "rojo",
    "verde",
@@ -26057,7 +23714,7 @@ module["exports"] = [
    "plata"
 ];
 
-},{}],360:[function(require,module,exports){
+},{}],339:[function(require,module,exports){
 module["exports"] = [
    "Libros",
    "Películas",
@@ -26083,9 +23740,9 @@ module["exports"] = [
    "Industrial"
 ];
 
-},{}],361:[function(require,module,exports){
-arguments[4][150][0].apply(exports,arguments)
-},{"./color":359,"./department":360,"./product_name":362,"dup":150}],362:[function(require,module,exports){
+},{}],340:[function(require,module,exports){
+arguments[4][129][0].apply(exports,arguments)
+},{"./color":338,"./department":339,"./product_name":341,"dup":129}],341:[function(require,module,exports){
 module["exports"] = {
 "adjective": [
      "Pequeño",
@@ -26146,9 +23803,9 @@ module["exports"] = {
   ]
 };
 
-},{}],363:[function(require,module,exports){
-arguments[4][322][0].apply(exports,arguments)
-},{"dup":322}],364:[function(require,module,exports){
+},{}],342:[function(require,module,exports){
+arguments[4][301][0].apply(exports,arguments)
+},{"dup":301}],343:[function(require,module,exports){
 module["exports"] = [
   "Clics y mortero",
   "Valor añadido",
@@ -26216,7 +23873,7 @@ module["exports"] = [
   "Holístico",
   "Ricos"
 ];
-},{}],365:[function(require,module,exports){
+},{}],344:[function(require,module,exports){
 module["exports"] = [
    "sinergias",
    "web-readiness",
@@ -26263,7 +23920,7 @@ module["exports"] = [
    "servicios web",
    "metodologías"
 ];
-},{}],366:[function(require,module,exports){
+},{}],345:[function(require,module,exports){
 module["exports"] = [
    "poner en práctica",
    "utilizar",
@@ -26326,9 +23983,9 @@ module["exports"] = [
    "redefinir",
    "recontextualizar"
 ]
-},{}],367:[function(require,module,exports){
-arguments[4][323][0].apply(exports,arguments)
-},{"dup":323}],368:[function(require,module,exports){
+},{}],346:[function(require,module,exports){
+arguments[4][302][0].apply(exports,arguments)
+},{"dup":302}],347:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
@@ -26340,13 +23997,13 @@ company.name = require("./name");
 company.bs_adjective = require("./bs_adjective");
 company.bs_noun = require("./bs_noun");
 
-},{"./adjective":363,"./bs_adjective":364,"./bs_noun":365,"./bs_verb":366,"./descriptor":367,"./name":369,"./noun":370,"./suffix":371}],369:[function(require,module,exports){
-arguments[4][325][0].apply(exports,arguments)
-},{"dup":325}],370:[function(require,module,exports){
-arguments[4][326][0].apply(exports,arguments)
-},{"dup":326}],371:[function(require,module,exports){
-arguments[4][327][0].apply(exports,arguments)
-},{"dup":327}],372:[function(require,module,exports){
+},{"./adjective":342,"./bs_adjective":343,"./bs_noun":344,"./bs_verb":345,"./descriptor":346,"./name":348,"./noun":349,"./suffix":350}],348:[function(require,module,exports){
+arguments[4][304][0].apply(exports,arguments)
+},{"dup":304}],349:[function(require,module,exports){
+arguments[4][305][0].apply(exports,arguments)
+},{"dup":305}],350:[function(require,module,exports){
+arguments[4][306][0].apply(exports,arguments)
+},{"dup":306}],351:[function(require,module,exports){
 var es_MX = {};
 module['exports'] = es_MX;
 es_MX.title = "Spanish Mexico";
@@ -26360,7 +24017,7 @@ es_MX.cell_phone = require("./cell_phone");
 es_MX.lorem = require("./lorem");
 es_MX.commerce = require("./commerce");
 es_MX.team = require("./team");
-},{"./address":347,"./cell_phone":358,"./commerce":361,"./company":368,"./internet":375,"./lorem":376,"./name":380,"./phone_number":387,"./team":389}],373:[function(require,module,exports){
+},{"./address":326,"./cell_phone":337,"./commerce":340,"./company":347,"./internet":354,"./lorem":355,"./name":359,"./phone_number":366,"./team":368}],352:[function(require,module,exports){
 module["exports"] = [
   "com",
   "mx",
@@ -26370,7 +24027,7 @@ module["exports"] = [
   "gob.mx"
 ];
 
-},{}],374:[function(require,module,exports){
+},{}],353:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.com",
@@ -26379,13 +24036,13 @@ module["exports"] = [
   "corpfolder.com"
 ];
 
-},{}],375:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":373,"./free_email":374,"dup":66}],376:[function(require,module,exports){
-arguments[4][190][0].apply(exports,arguments)
-},{"./supplemental":377,"./words":378,"dup":190}],377:[function(require,module,exports){
-arguments[4][191][0].apply(exports,arguments)
-},{"dup":191}],378:[function(require,module,exports){
+},{}],354:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":352,"./free_email":353,"dup":45}],355:[function(require,module,exports){
+arguments[4][169][0].apply(exports,arguments)
+},{"./supplemental":356,"./words":357,"dup":169}],356:[function(require,module,exports){
+arguments[4][170][0].apply(exports,arguments)
+},{"dup":170}],357:[function(require,module,exports){
 module["exports"] = [
 "Abacalero",
 "Abacería",
@@ -26657,7 +24314,7 @@ module["exports"] = [
 "Incrustación"
 ];
 
-},{}],379:[function(require,module,exports){
+},{}],358:[function(require,module,exports){
 module["exports"] = [
 "Aarón",
 "Abraham",
@@ -26964,9 +24621,9 @@ module["exports"] = [
 "Yaretzi",
 "Zoe"
 ]
-},{}],380:[function(require,module,exports){
-arguments[4][194][0].apply(exports,arguments)
-},{"./first_name":379,"./last_name":381,"./name":382,"./prefix":383,"./suffix":384,"./title":385,"dup":194}],381:[function(require,module,exports){
+},{}],359:[function(require,module,exports){
+arguments[4][173][0].apply(exports,arguments)
+},{"./first_name":358,"./last_name":360,"./name":361,"./prefix":362,"./suffix":363,"./title":364,"dup":173}],360:[function(require,module,exports){
 module["exports"] = [
   "Abeyta",
 "Abrego",
@@ -27657,7 +25314,7 @@ module["exports"] = [
 "Zúñiga"
 ];
 
-},{}],382:[function(require,module,exports){
+},{}],361:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{first_name} #{last_name} #{last_name}",
   "#{first_name} #{last_name} de #{last_name}",
@@ -27666,9 +25323,9 @@ module["exports"] = [
   "#{first_name} #{last_name} #{last_name}"
 ];
 
-},{}],383:[function(require,module,exports){
-arguments[4][336][0].apply(exports,arguments)
-},{"dup":336}],384:[function(require,module,exports){
+},{}],362:[function(require,module,exports){
+arguments[4][315][0].apply(exports,arguments)
+},{"dup":315}],363:[function(require,module,exports){
 module["exports"] = [
   "Jr.",
   "Sr.",
@@ -27687,7 +25344,7 @@ module["exports"] = [
   "Mtro."
 ];
 
-},{}],385:[function(require,module,exports){
+},{}],364:[function(require,module,exports){
  module["exports"] = {
   "descriptor": [
     "Jefe",
@@ -27784,7 +25441,7 @@ module["exports"] = [
   ]
 };
 
-},{}],386:[function(require,module,exports){
+},{}],365:[function(require,module,exports){
 module["exports"] = [
   "5###-###-###",
   "5##.###.###",
@@ -27792,9 +25449,9 @@ module["exports"] = [
   "5########"
 ];
 
-},{}],387:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":386,"dup":76}],388:[function(require,module,exports){
+},{}],366:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":365,"dup":55}],367:[function(require,module,exports){
 module["exports"] = [
   "hormigas",
    "murciélagos",
@@ -27865,17 +25522,17 @@ module["exports"] = [
    "druidas"
 ];
 
-},{}],389:[function(require,module,exports){
-arguments[4][203][0].apply(exports,arguments)
-},{"./creature":388,"./name":390,"dup":203}],390:[function(require,module,exports){
-arguments[4][204][0].apply(exports,arguments)
-},{"dup":204}],391:[function(require,module,exports){
+},{}],368:[function(require,module,exports){
+arguments[4][182][0].apply(exports,arguments)
+},{"./creature":367,"./name":369,"dup":182}],369:[function(require,module,exports){
+arguments[4][183][0].apply(exports,arguments)
+},{"dup":183}],370:[function(require,module,exports){
 var fa = {};
 module['exports'] = fa;
 fa.title = "Farsi";
 fa.name = require("./name");
 
-},{"./name":393}],392:[function(require,module,exports){
+},{"./name":372}],371:[function(require,module,exports){
 module["exports"] = [
   "آبان دخت",
   "آبتین",
@@ -28601,14 +26258,14 @@ module["exports"] = [
   "یوشیتا"
 ];
 
-},{}],393:[function(require,module,exports){
+},{}],372:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
 name.last_name = require("./last_name");
 name.prefix = require("./prefix");
 
-},{"./first_name":392,"./last_name":394,"./prefix":395}],394:[function(require,module,exports){
+},{"./first_name":371,"./last_name":373,"./prefix":374}],373:[function(require,module,exports){
 module["exports"] = [
   "عارف",
   "عاشوری",
@@ -28756,14 +26413,14 @@ module["exports"] = [
   "یلدا"
 ];
 
-},{}],395:[function(require,module,exports){
+},{}],374:[function(require,module,exports){
 module["exports"] = [
   "آقای",
   "خانم",
   "دکتر"
 ];
 
-},{}],396:[function(require,module,exports){
+},{}],375:[function(require,module,exports){
 module["exports"] = [
   "####",
   "###",
@@ -28771,9 +26428,9 @@ module["exports"] = [
   "#"
 ];
 
-},{}],397:[function(require,module,exports){
-arguments[4][78][0].apply(exports,arguments)
-},{"dup":78}],398:[function(require,module,exports){
+},{}],376:[function(require,module,exports){
+arguments[4][57][0].apply(exports,arguments)
+},{"dup":57}],377:[function(require,module,exports){
 module["exports"] = [
   "Paris",
   "Marseille",
@@ -28877,12 +26534,12 @@ module["exports"] = [
   "Cholet"
 ];
 
-},{}],399:[function(require,module,exports){
+},{}],378:[function(require,module,exports){
 module["exports"] = [
   "France"
 ];
 
-},{}],400:[function(require,module,exports){
+},{}],379:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.building_number = require("./building_number");
@@ -28897,15 +26554,15 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":396,"./city":397,"./city_name":398,"./default_country":399,"./postcode":401,"./secondary_address":402,"./state":403,"./street_address":404,"./street_name":405,"./street_prefix":406,"./street_suffix":407}],401:[function(require,module,exports){
-arguments[4][311][0].apply(exports,arguments)
-},{"dup":311}],402:[function(require,module,exports){
+},{"./building_number":375,"./city":376,"./city_name":377,"./default_country":378,"./postcode":380,"./secondary_address":381,"./state":382,"./street_address":383,"./street_name":384,"./street_prefix":385,"./street_suffix":386}],380:[function(require,module,exports){
+arguments[4][290][0].apply(exports,arguments)
+},{"dup":290}],381:[function(require,module,exports){
 module["exports"] = [
   "Apt. ###",
   "# étage"
 ];
 
-},{}],403:[function(require,module,exports){
+},{}],382:[function(require,module,exports){
 module["exports"] = [
   "Alsace",
   "Aquitaine",
@@ -28931,14 +26588,14 @@ module["exports"] = [
   "Rhône-Alpes"
 ];
 
-},{}],404:[function(require,module,exports){
-arguments[4][134][0].apply(exports,arguments)
-},{"dup":134}],405:[function(require,module,exports){
+},{}],383:[function(require,module,exports){
+arguments[4][113][0].apply(exports,arguments)
+},{"dup":113}],384:[function(require,module,exports){
 module["exports"] = [
   "#{street_prefix} #{street_suffix}"
 ];
 
-},{}],406:[function(require,module,exports){
+},{}],385:[function(require,module,exports){
 module["exports"] = [
   "Allée, Voie",
   "Rue",
@@ -28950,7 +26607,7 @@ module["exports"] = [
   "Place"
 ];
 
-},{}],407:[function(require,module,exports){
+},{}],386:[function(require,module,exports){
 module["exports"] = [
   "de l'Abbaye",
   "Adolphe Mille",
@@ -29020,27 +26677,27 @@ module["exports"] = [
   "Zadkine"
 ];
 
-},{}],408:[function(require,module,exports){
-arguments[4][152][0].apply(exports,arguments)
-},{"dup":152}],409:[function(require,module,exports){
-arguments[4][153][0].apply(exports,arguments)
-},{"dup":153}],410:[function(require,module,exports){
-arguments[4][154][0].apply(exports,arguments)
-},{"dup":154}],411:[function(require,module,exports){
-arguments[4][155][0].apply(exports,arguments)
-},{"dup":155}],412:[function(require,module,exports){
-arguments[4][156][0].apply(exports,arguments)
-},{"dup":156}],413:[function(require,module,exports){
-arguments[4][157][0].apply(exports,arguments)
-},{"./adjective":408,"./bs_adjective":409,"./bs_noun":410,"./bs_verb":411,"./descriptor":412,"./name":414,"./noun":415,"./suffix":416,"dup":157}],414:[function(require,module,exports){
+},{}],387:[function(require,module,exports){
+arguments[4][131][0].apply(exports,arguments)
+},{"dup":131}],388:[function(require,module,exports){
+arguments[4][132][0].apply(exports,arguments)
+},{"dup":132}],389:[function(require,module,exports){
+arguments[4][133][0].apply(exports,arguments)
+},{"dup":133}],390:[function(require,module,exports){
+arguments[4][134][0].apply(exports,arguments)
+},{"dup":134}],391:[function(require,module,exports){
+arguments[4][135][0].apply(exports,arguments)
+},{"dup":135}],392:[function(require,module,exports){
+arguments[4][136][0].apply(exports,arguments)
+},{"./adjective":387,"./bs_adjective":388,"./bs_noun":389,"./bs_verb":390,"./descriptor":391,"./name":393,"./noun":394,"./suffix":395,"dup":136}],393:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name} et #{Name.last_name}"
 ];
 
-},{}],415:[function(require,module,exports){
-arguments[4][159][0].apply(exports,arguments)
-},{"dup":159}],416:[function(require,module,exports){
+},{}],394:[function(require,module,exports){
+arguments[4][138][0].apply(exports,arguments)
+},{"dup":138}],395:[function(require,module,exports){
 module["exports"] = [
   "SARL",
   "SA",
@@ -29052,7 +26709,7 @@ module["exports"] = [
   "EI"
 ];
 
-},{}],417:[function(require,module,exports){
+},{}],396:[function(require,module,exports){
 var fr = {};
 module['exports'] = fr;
 fr.title = "French";
@@ -29063,7 +26720,7 @@ fr.lorem = require("./lorem");
 fr.name = require("./name");
 fr.phone_number = require("./phone_number");
 
-},{"./address":400,"./company":413,"./internet":420,"./lorem":421,"./name":425,"./phone_number":431}],418:[function(require,module,exports){
+},{"./address":379,"./company":392,"./internet":399,"./lorem":400,"./name":404,"./phone_number":410}],397:[function(require,module,exports){
 module["exports"] = [
   "com",
   "fr",
@@ -29074,22 +26731,22 @@ module["exports"] = [
   "org"
 ];
 
-},{}],419:[function(require,module,exports){
+},{}],398:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.fr",
   "hotmail.fr"
 ];
 
-},{}],420:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":418,"./free_email":419,"dup":66}],421:[function(require,module,exports){
-arguments[4][190][0].apply(exports,arguments)
-},{"./supplemental":422,"./words":423,"dup":190}],422:[function(require,module,exports){
-arguments[4][191][0].apply(exports,arguments)
-},{"dup":191}],423:[function(require,module,exports){
-arguments[4][68][0].apply(exports,arguments)
-},{"dup":68}],424:[function(require,module,exports){
+},{}],399:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":397,"./free_email":398,"dup":45}],400:[function(require,module,exports){
+arguments[4][169][0].apply(exports,arguments)
+},{"./supplemental":401,"./words":402,"dup":169}],401:[function(require,module,exports){
+arguments[4][170][0].apply(exports,arguments)
+},{"dup":170}],402:[function(require,module,exports){
+arguments[4][47][0].apply(exports,arguments)
+},{"dup":47}],403:[function(require,module,exports){
 module["exports"] = [
   "Enzo",
   "Lucas",
@@ -29182,7 +26839,7 @@ module["exports"] = [
   "Mélissa"
 ];
 
-},{}],425:[function(require,module,exports){
+},{}],404:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
@@ -29191,7 +26848,7 @@ name.prefix = require("./prefix");
 name.title = require("./title");
 name.name = require("./name");
 
-},{"./first_name":424,"./last_name":426,"./name":427,"./prefix":428,"./title":429}],426:[function(require,module,exports){
+},{"./first_name":403,"./last_name":405,"./name":406,"./prefix":407,"./title":408}],405:[function(require,module,exports){
 module["exports"] = [
   "Martin",
   "Bernard",
@@ -29345,14 +27002,14 @@ module["exports"] = [
   "Cousin"
 ];
 
-},{}],427:[function(require,module,exports){
+},{}],406:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{first_name} #{last_name}",
   "#{first_name} #{last_name}",
   "#{last_name} #{first_name}"
 ];
 
-},{}],428:[function(require,module,exports){
+},{}],407:[function(require,module,exports){
 module["exports"] = [
   "M",
   "Mme",
@@ -29361,7 +27018,7 @@ module["exports"] = [
   "Prof"
 ];
 
-},{}],429:[function(require,module,exports){
+},{}],408:[function(require,module,exports){
 module["exports"] = {
   "job": [
     "Superviseur",
@@ -29385,7 +27042,7 @@ module["exports"] = {
   ]
 };
 
-},{}],430:[function(require,module,exports){
+},{}],409:[function(require,module,exports){
 module["exports"] = [
   "01########",
   "02########",
@@ -29403,15 +27060,15 @@ module["exports"] = [
   "+33 7########"
 ];
 
-},{}],431:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":430,"dup":76}],432:[function(require,module,exports){
-arguments[4][225][0].apply(exports,arguments)
-},{"dup":225}],433:[function(require,module,exports){
-arguments[4][258][0].apply(exports,arguments)
-},{"./default_country":432,"./postcode":434,"./state":435,"./state_abbr":436,"dup":258}],434:[function(require,module,exports){
-arguments[4][227][0].apply(exports,arguments)
-},{"dup":227}],435:[function(require,module,exports){
+},{}],410:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":409,"dup":55}],411:[function(require,module,exports){
+arguments[4][204][0].apply(exports,arguments)
+},{"dup":204}],412:[function(require,module,exports){
+arguments[4][237][0].apply(exports,arguments)
+},{"./default_country":411,"./postcode":413,"./state":414,"./state_abbr":415,"dup":237}],413:[function(require,module,exports){
+arguments[4][206][0].apply(exports,arguments)
+},{"dup":206}],414:[function(require,module,exports){
 module["exports"] = [
   "Alberta",
   "Colombie-Britannique",
@@ -29428,7 +27085,7 @@ module["exports"] = [
   "Yukon"
 ];
 
-},{}],436:[function(require,module,exports){
+},{}],415:[function(require,module,exports){
 module["exports"] = [
   "AB",
   "BC",
@@ -29445,7 +27102,7 @@ module["exports"] = [
   "YK"
 ];
 
-},{}],437:[function(require,module,exports){
+},{}],416:[function(require,module,exports){
 var fr_CA = {};
 module['exports'] = fr_CA;
 fr_CA.title = "Canada (French)";
@@ -29453,7 +27110,7 @@ fr_CA.address = require("./address");
 fr_CA.internet = require("./internet");
 fr_CA.phone_number = require("./phone_number");
 
-},{"./address":433,"./internet":440,"./phone_number":442}],438:[function(require,module,exports){
+},{"./address":412,"./internet":419,"./phone_number":421}],417:[function(require,module,exports){
 module["exports"] = [
   "qc.ca",
   "ca",
@@ -29465,27 +27122,27 @@ module["exports"] = [
   "org"
 ];
 
-},{}],439:[function(require,module,exports){
-arguments[4][232][0].apply(exports,arguments)
-},{"dup":232}],440:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":438,"./free_email":439,"dup":66}],441:[function(require,module,exports){
+},{}],418:[function(require,module,exports){
+arguments[4][211][0].apply(exports,arguments)
+},{"dup":211}],419:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":417,"./free_email":418,"dup":45}],420:[function(require,module,exports){
 module["exports"] = [
   "### ###-####",
   "1 ### ###-####",
   "### ###-####, poste ###"
 ];
 
-},{}],442:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":441,"dup":76}],443:[function(require,module,exports){
+},{}],421:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":420,"dup":55}],422:[function(require,module,exports){
 module["exports"] = [
   "###",
   "##",
   "#"
 ];
 
-},{}],444:[function(require,module,exports){
+},{}],423:[function(require,module,exports){
 module["exports"] = [
   "#{city_prefix} #{Name.first_name}#{city_suffix}",
   "#{city_prefix} #{Name.first_name}",
@@ -29495,7 +27152,7 @@ module["exports"] = [
   "#{Name.last_name}#{city_suffix}"
 ];
 
-},{}],445:[function(require,module,exports){
+},{}],424:[function(require,module,exports){
 module["exports"] = [
   "აბასთუმანი",
   "აბაშა",
@@ -29587,7 +27244,7 @@ module["exports"] = [
   "ხულო"
 ];
 
-},{}],446:[function(require,module,exports){
+},{}],425:[function(require,module,exports){
 module["exports"] = [
   "ახალი",
   "ძველი",
@@ -29595,7 +27252,7 @@ module["exports"] = [
   "ქვემო"
 ];
 
-},{}],447:[function(require,module,exports){
+},{}],426:[function(require,module,exports){
 module["exports"] = [
   "სოფელი",
   "ძირი",
@@ -29603,7 +27260,7 @@ module["exports"] = [
   "დაბა"
 ];
 
-},{}],448:[function(require,module,exports){
+},{}],427:[function(require,module,exports){
 module["exports"] = [
   "ავსტრალია",
   "ავსტრია",
@@ -29920,12 +27577,12 @@ module["exports"] = [
   "ჰონკონგი"
 ];
 
-},{}],449:[function(require,module,exports){
+},{}],428:[function(require,module,exports){
 module["exports"] = [
   "საქართველო"
 ];
 
-},{}],450:[function(require,module,exports){
+},{}],429:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -29942,25 +27599,25 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":443,"./city":444,"./city_name":445,"./city_prefix":446,"./city_suffix":447,"./country":448,"./default_country":449,"./postcode":451,"./secondary_address":452,"./street_address":453,"./street_name":454,"./street_suffix":455,"./street_title":456}],451:[function(require,module,exports){
+},{"./building_number":422,"./city":423,"./city_name":424,"./city_prefix":425,"./city_suffix":426,"./country":427,"./default_country":428,"./postcode":430,"./secondary_address":431,"./street_address":432,"./street_name":433,"./street_suffix":434,"./street_title":435}],430:[function(require,module,exports){
 module["exports"] = [
   "01##"
 ];
 
-},{}],452:[function(require,module,exports){
+},{}],431:[function(require,module,exports){
 module["exports"] = [
   "კორპ. ##",
   "შენობა ###"
 ];
 
-},{}],453:[function(require,module,exports){
-arguments[4][54][0].apply(exports,arguments)
-},{"dup":54}],454:[function(require,module,exports){
+},{}],432:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"dup":33}],433:[function(require,module,exports){
 module["exports"] = [
   "#{street_title} #{street_suffix}"
 ];
 
-},{}],455:[function(require,module,exports){
+},{}],434:[function(require,module,exports){
 module["exports"] = [
   "გამზ.",
   "გამზირი",
@@ -29970,7 +27627,7 @@ module["exports"] = [
   "ხეივანი"
 ];
 
-},{}],456:[function(require,module,exports){
+},{}],435:[function(require,module,exports){
 module["exports"] = [
   "აბაშიძის",
   "აბესაძის",
@@ -30390,7 +28047,7 @@ module["exports"] = [
   "ჯორჯიაშვილის"
 ];
 
-},{}],457:[function(require,module,exports){
+},{}],436:[function(require,module,exports){
 module["exports"] = [
   "(+995 32) 2-##-##-##",
   "032-2-##-##-##",
@@ -30403,16 +28060,16 @@ module["exports"] = [
   "2 ### ###"
 ];
 
-},{}],458:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":457,"dup":58}],459:[function(require,module,exports){
+},{}],437:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":436,"dup":37}],438:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.prefix = require("./prefix");
 company.suffix = require("./suffix");
 company.name = require("./name");
 
-},{"./name":460,"./prefix":461,"./suffix":462}],460:[function(require,module,exports){
+},{"./name":439,"./prefix":440,"./suffix":441}],439:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{Name.first_name}",
   "#{prefix} #{Name.last_name}",
@@ -30421,7 +28078,7 @@ module["exports"] = [
   "#{prefix} #{Name.last_name}-#{Name.last_name}"
 ];
 
-},{}],461:[function(require,module,exports){
+},{}],440:[function(require,module,exports){
 module["exports"] = [
   "შპს",
   "სს",
@@ -30429,7 +28086,7 @@ module["exports"] = [
   "სსიპ"
 ];
 
-},{}],462:[function(require,module,exports){
+},{}],441:[function(require,module,exports){
 module["exports"] = [
   "ჯგუფი",
   "და კომპანია",
@@ -30437,7 +28094,7 @@ module["exports"] = [
   "გრუპი"
 ];
 
-},{}],463:[function(require,module,exports){
+},{}],442:[function(require,module,exports){
 var ge = {};
 module['exports'] = ge;
 ge.title = "Georgian";
@@ -30449,7 +28106,7 @@ ge.company = require("./company");
 ge.phone_number = require("./phone_number");
 ge.cell_phone = require("./cell_phone");
 
-},{"./address":450,"./cell_phone":458,"./company":459,"./internet":466,"./name":468,"./phone_number":474}],464:[function(require,module,exports){
+},{"./address":429,"./cell_phone":437,"./company":438,"./internet":445,"./name":447,"./phone_number":453}],443:[function(require,module,exports){
 module["exports"] = [
   "ge",
   "com",
@@ -30459,16 +28116,16 @@ module["exports"] = [
   "org.ge"
 ];
 
-},{}],465:[function(require,module,exports){
+},{}],444:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.com",
   "posta.ge"
 ];
 
-},{}],466:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":464,"./free_email":465,"dup":66}],467:[function(require,module,exports){
+},{}],445:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":443,"./free_email":444,"dup":45}],446:[function(require,module,exports){
 module["exports"] = [
   "აგული",
   "აგუნა",
@@ -30971,9 +28628,9 @@ module["exports"] = [
   "ჰამლეტ"
 ];
 
-},{}],468:[function(require,module,exports){
-arguments[4][425][0].apply(exports,arguments)
-},{"./first_name":467,"./last_name":469,"./name":470,"./prefix":471,"./title":472,"dup":425}],469:[function(require,module,exports){
+},{}],447:[function(require,module,exports){
+arguments[4][404][0].apply(exports,arguments)
+},{"./first_name":446,"./last_name":448,"./name":449,"./prefix":450,"./title":451,"dup":404}],448:[function(require,module,exports){
 module["exports"] = [
   "აბაზაძე",
   "აბაშიძე",
@@ -31146,7 +28803,7 @@ module["exports"] = [
   "ჯუღაშვილი"
 ];
 
-},{}],470:[function(require,module,exports){
+},{}],449:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{first_name} #{last_name}",
   "#{first_name} #{last_name}",
@@ -31156,7 +28813,7 @@ module["exports"] = [
   "#{first_name} #{last_name}"
 ];
 
-},{}],471:[function(require,module,exports){
+},{}],450:[function(require,module,exports){
 module["exports"] = [
   "ბ-ნი",
   "ბატონი",
@@ -31164,7 +28821,7 @@ module["exports"] = [
   "ქალბატონი"
 ];
 
-},{}],472:[function(require,module,exports){
+},{}],451:[function(require,module,exports){
 module["exports"] = {
   "descriptor": [
     "გენერალური",
@@ -31242,7 +28899,7 @@ module["exports"] = {
   ]
 };
 
-},{}],473:[function(require,module,exports){
+},{}],452:[function(require,module,exports){
 module["exports"] = [
   "5##-###-###",
   "5########",
@@ -31266,11 +28923,11 @@ module["exports"] = [
   "(+995) 5## ### ###"
 ];
 
-},{}],474:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":473,"dup":76}],475:[function(require,module,exports){
-arguments[4][443][0].apply(exports,arguments)
-},{"dup":443}],476:[function(require,module,exports){
+},{}],453:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":452,"dup":55}],454:[function(require,module,exports){
+arguments[4][422][0].apply(exports,arguments)
+},{"dup":422}],455:[function(require,module,exports){
 module["exports"] = [
   "#{city_prefix} #{Name.first_name} #{city_suffix}",
   "#{city_prefix} #{Name.first_name}",
@@ -31278,7 +28935,7 @@ module["exports"] = [
   "#{Name.last_name} #{city_suffix}"
 ];
 
-},{}],477:[function(require,module,exports){
+},{}],456:[function(require,module,exports){
 module["exports"] = [
   "San",
   "Borgo",
@@ -31287,7 +28944,7 @@ module["exports"] = [
   "Settimo"
 ];
 
-},{}],478:[function(require,module,exports){
+},{}],457:[function(require,module,exports){
 module["exports"] = [
   "a mare",
   "lido",
@@ -31303,7 +28960,7 @@ module["exports"] = [
   "sardo"
 ];
 
-},{}],479:[function(require,module,exports){
+},{}],458:[function(require,module,exports){
 module["exports"] = [
   "Afghanistan",
   "Albania",
@@ -31548,12 +29205,12 @@ module["exports"] = [
   "Zimbabwe"
 ];
 
-},{}],480:[function(require,module,exports){
+},{}],459:[function(require,module,exports){
 module["exports"] = [
   "Italia"
 ];
 
-},{}],481:[function(require,module,exports){
+},{}],460:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -31570,15 +29227,15 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":475,"./city":476,"./city_prefix":477,"./city_suffix":478,"./country":479,"./default_country":480,"./postcode":482,"./secondary_address":483,"./state":484,"./state_abbr":485,"./street_address":486,"./street_name":487,"./street_suffix":488}],482:[function(require,module,exports){
-arguments[4][311][0].apply(exports,arguments)
-},{"dup":311}],483:[function(require,module,exports){
+},{"./building_number":454,"./city":455,"./city_prefix":456,"./city_suffix":457,"./country":458,"./default_country":459,"./postcode":461,"./secondary_address":462,"./state":463,"./state_abbr":464,"./street_address":465,"./street_name":466,"./street_suffix":467}],461:[function(require,module,exports){
+arguments[4][290][0].apply(exports,arguments)
+},{"dup":290}],462:[function(require,module,exports){
 module["exports"] = [
   "Appartamento ##",
   "Piano #"
 ];
 
-},{}],484:[function(require,module,exports){
+},{}],463:[function(require,module,exports){
 module["exports"] = [
   "Agrigento",
   "Alessandria",
@@ -31692,7 +29349,7 @@ module["exports"] = [
   "Viterbo"
 ];
 
-},{}],485:[function(require,module,exports){
+},{}],464:[function(require,module,exports){
 module["exports"] = [
   "AG",
   "AL",
@@ -31806,19 +29463,19 @@ module["exports"] = [
   "VT"
 ];
 
-},{}],486:[function(require,module,exports){
+},{}],465:[function(require,module,exports){
 module["exports"] = [
   "#{street_name} #{building_number}",
   "#{street_name} #{building_number}, #{secondary_address}"
 ];
 
-},{}],487:[function(require,module,exports){
+},{}],466:[function(require,module,exports){
 module["exports"] = [
   "#{street_suffix} #{Name.first_name}",
   "#{street_suffix} #{Name.last_name}"
 ];
 
-},{}],488:[function(require,module,exports){
+},{}],467:[function(require,module,exports){
 module["exports"] = [
   "Piazza",
   "Strada",
@@ -31829,7 +29486,7 @@ module["exports"] = [
   "Incrocio"
 ];
 
-},{}],489:[function(require,module,exports){
+},{}],468:[function(require,module,exports){
 module["exports"] = [
   "24 ore",
   "24/7",
@@ -31903,7 +29560,7 @@ module["exports"] = [
   "valore aggiunto"
 ];
 
-},{}],490:[function(require,module,exports){
+},{}],469:[function(require,module,exports){
 module["exports"] = [
   "valore aggiunto",
   "verticalizzate",
@@ -31953,7 +29610,7 @@ module["exports"] = [
   "ricche"
 ];
 
-},{}],491:[function(require,module,exports){
+},{}],470:[function(require,module,exports){
 module["exports"] = [
   "partnerships",
   "comunità",
@@ -31983,7 +29640,7 @@ module["exports"] = [
   "metodologie"
 ];
 
-},{}],492:[function(require,module,exports){
+},{}],471:[function(require,module,exports){
 module["exports"] = [
   "implementate",
   "utilizzo",
@@ -32015,7 +29672,7 @@ module["exports"] = [
   "ricontestualizzate"
 ];
 
-},{}],493:[function(require,module,exports){
+},{}],472:[function(require,module,exports){
 module["exports"] = [
   "adattiva",
   "avanzata",
@@ -32076,7 +29733,7 @@ module["exports"] = [
   "visionaria"
 ];
 
-},{}],494:[function(require,module,exports){
+},{}],473:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
@@ -32088,14 +29745,14 @@ company.bs_verb = require("./bs_verb");
 company.bs_adjective = require("./bs_adjective");
 company.name = require("./name");
 
-},{"./adjective":489,"./bs_adjective":490,"./bs_noun":491,"./bs_verb":492,"./descriptor":493,"./name":495,"./noun":496,"./suffix":497}],495:[function(require,module,exports){
+},{"./adjective":468,"./bs_adjective":469,"./bs_noun":470,"./bs_verb":471,"./descriptor":472,"./name":474,"./noun":475,"./suffix":476}],474:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name}-#{Name.last_name} #{suffix}",
   "#{Name.last_name}, #{Name.last_name} e #{Name.last_name} #{suffix}"
 ];
 
-},{}],496:[function(require,module,exports){
+},{}],475:[function(require,module,exports){
 module["exports"] = [
   "Abilità",
   "Access",
@@ -32188,7 +29845,7 @@ module["exports"] = [
   "Forza lavoro"
 ];
 
-},{}],497:[function(require,module,exports){
+},{}],476:[function(require,module,exports){
 module["exports"] = [
   "SPA",
   "e figli",
@@ -32196,7 +29853,7 @@ module["exports"] = [
   "s.r.l."
 ];
 
-},{}],498:[function(require,module,exports){
+},{}],477:[function(require,module,exports){
 var it = {};
 module['exports'] = it;
 it.title = "Italian";
@@ -32206,7 +29863,7 @@ it.internet = require("./internet");
 it.name = require("./name");
 it.phone_number = require("./phone_number");
 
-},{"./address":481,"./company":494,"./internet":501,"./name":503,"./phone_number":509}],499:[function(require,module,exports){
+},{"./address":460,"./company":473,"./internet":480,"./name":482,"./phone_number":488}],478:[function(require,module,exports){
 module["exports"] = [
   "com",
   "com",
@@ -32218,7 +29875,7 @@ module["exports"] = [
   "it"
 ];
 
-},{}],500:[function(require,module,exports){
+},{}],479:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.com",
@@ -32228,9 +29885,9 @@ module["exports"] = [
   "yahoo.it"
 ];
 
-},{}],501:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":499,"./free_email":500,"dup":66}],502:[function(require,module,exports){
+},{}],480:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":478,"./free_email":479,"dup":45}],481:[function(require,module,exports){
 module["exports"] = [
   "Aaron",
   "Akira",
@@ -32596,7 +30253,7 @@ module["exports"] = [
   "Zelida"
 ];
 
-},{}],503:[function(require,module,exports){
+},{}],482:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
@@ -32605,7 +30262,7 @@ name.prefix = require("./prefix");
 name.suffix = require("./suffix");
 name.name = require("./name");
 
-},{"./first_name":502,"./last_name":504,"./name":505,"./prefix":506,"./suffix":507}],504:[function(require,module,exports){
+},{"./first_name":481,"./last_name":483,"./name":484,"./prefix":485,"./suffix":486}],483:[function(require,module,exports){
 module["exports"] = [
   "Amato",
   "Barbieri",
@@ -32709,9 +30366,9 @@ module["exports"] = [
   "Vitali"
 ];
 
-},{}],505:[function(require,module,exports){
-arguments[4][470][0].apply(exports,arguments)
-},{"dup":470}],506:[function(require,module,exports){
+},{}],484:[function(require,module,exports){
+arguments[4][449][0].apply(exports,arguments)
+},{"dup":449}],485:[function(require,module,exports){
 module["exports"] = [
   "Sig.",
   "Dott.",
@@ -32719,10 +30376,10 @@ module["exports"] = [
   "Ing."
 ];
 
-},{}],507:[function(require,module,exports){
+},{}],486:[function(require,module,exports){
 module["exports"] = [];
 
-},{}],508:[function(require,module,exports){
+},{}],487:[function(require,module,exports){
 module["exports"] = [
   "+## ### ## ## ####",
   "+## ## #######",
@@ -32737,9 +30394,9 @@ module["exports"] = [
   "+39 3## ### ###"
 ];
 
-},{}],509:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":508,"dup":76}],510:[function(require,module,exports){
+},{}],488:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":487,"dup":55}],489:[function(require,module,exports){
 module["exports"] = [
   "#{city_prefix}#{Name.first_name}#{city_suffix}",
   "#{Name.first_name}#{city_suffix}",
@@ -32747,7 +30404,7 @@ module["exports"] = [
   "#{Name.last_name}#{city_suffix}"
 ];
 
-},{}],511:[function(require,module,exports){
+},{}],490:[function(require,module,exports){
 module["exports"] = [
   "北",
   "東",
@@ -32758,7 +30415,7 @@ module["exports"] = [
   "港"
 ];
 
-},{}],512:[function(require,module,exports){
+},{}],491:[function(require,module,exports){
 module["exports"] = [
   "市",
   "区",
@@ -32766,7 +30423,7 @@ module["exports"] = [
   "村"
 ];
 
-},{}],513:[function(require,module,exports){
+},{}],492:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.postcode = require("./postcode");
@@ -32777,12 +30434,12 @@ address.city_suffix = require("./city_suffix");
 address.city = require("./city");
 address.street_name = require("./street_name");
 
-},{"./city":510,"./city_prefix":511,"./city_suffix":512,"./postcode":514,"./state":515,"./state_abbr":516,"./street_name":517}],514:[function(require,module,exports){
+},{"./city":489,"./city_prefix":490,"./city_suffix":491,"./postcode":493,"./state":494,"./state_abbr":495,"./street_name":496}],493:[function(require,module,exports){
 module["exports"] = [
   "###-####"
 ];
 
-},{}],515:[function(require,module,exports){
+},{}],494:[function(require,module,exports){
 module["exports"] = [
   "北海道",
   "青森県",
@@ -32833,7 +30490,7 @@ module["exports"] = [
   "沖縄県"
 ];
 
-},{}],516:[function(require,module,exports){
+},{}],495:[function(require,module,exports){
 module["exports"] = [
   "1",
   "2",
@@ -32884,22 +30541,22 @@ module["exports"] = [
   "47"
 ];
 
-},{}],517:[function(require,module,exports){
+},{}],496:[function(require,module,exports){
 module["exports"] = [
   "#{Name.first_name}#{street_suffix}",
   "#{Name.last_name}#{street_suffix}"
 ];
 
-},{}],518:[function(require,module,exports){
+},{}],497:[function(require,module,exports){
 module["exports"] = [
   "090-####-####",
   "080-####-####",
   "070-####-####"
 ];
 
-},{}],519:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":518,"dup":58}],520:[function(require,module,exports){
+},{}],498:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":497,"dup":37}],499:[function(require,module,exports){
 var ja = {};
 module['exports'] = ja;
 ja.title = "Japanese";
@@ -32908,7 +30565,7 @@ ja.phone_number = require("./phone_number");
 ja.cell_phone = require("./cell_phone");
 ja.name = require("./name");
 
-},{"./address":513,"./cell_phone":519,"./name":522,"./phone_number":526}],521:[function(require,module,exports){
+},{"./address":492,"./cell_phone":498,"./name":501,"./phone_number":505}],500:[function(require,module,exports){
 module["exports"] = [
   "大翔",
   "蓮",
@@ -32933,14 +30590,14 @@ module["exports"] = [
   "美咲"
 ];
 
-},{}],522:[function(require,module,exports){
+},{}],501:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.last_name = require("./last_name");
 name.first_name = require("./first_name");
 name.name = require("./name");
 
-},{"./first_name":521,"./last_name":523,"./name":524}],523:[function(require,module,exports){
+},{"./first_name":500,"./last_name":502,"./name":503}],502:[function(require,module,exports){
 module["exports"] = [
   "佐藤",
   "鈴木",
@@ -32964,12 +30621,12 @@ module["exports"] = [
   "清水"
 ];
 
-},{}],524:[function(require,module,exports){
+},{}],503:[function(require,module,exports){
 module["exports"] = [
   "#{last_name} #{first_name}"
 ];
 
-},{}],525:[function(require,module,exports){
+},{}],504:[function(require,module,exports){
 module["exports"] = [
   "0####-#-####",
   "0###-##-####",
@@ -32977,14 +30634,14 @@ module["exports"] = [
   "0#-####-####"
 ];
 
-},{}],526:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":525,"dup":76}],527:[function(require,module,exports){
+},{}],505:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":504,"dup":55}],506:[function(require,module,exports){
 module["exports"] = [
   "#{city_name}#{city_suffix}"
 ];
 
-},{}],528:[function(require,module,exports){
+},{}],507:[function(require,module,exports){
 module["exports"] = [
   "강릉",
   "양양",
@@ -33016,14 +30673,14 @@ module["exports"] = [
   "수성"
 ];
 
-},{}],529:[function(require,module,exports){
+},{}],508:[function(require,module,exports){
 module["exports"] = [
   "구",
   "시",
   "군"
 ];
 
-},{}],530:[function(require,module,exports){
+},{}],509:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.postcode = require("./postcode");
@@ -33036,12 +30693,12 @@ address.street_root = require("./street_root");
 address.street_suffix = require("./street_suffix");
 address.street_name = require("./street_name");
 
-},{"./city":527,"./city_name":528,"./city_suffix":529,"./postcode":531,"./state":532,"./state_abbr":533,"./street_name":534,"./street_root":535,"./street_suffix":536}],531:[function(require,module,exports){
+},{"./city":506,"./city_name":507,"./city_suffix":508,"./postcode":510,"./state":511,"./state_abbr":512,"./street_name":513,"./street_root":514,"./street_suffix":515}],510:[function(require,module,exports){
 module["exports"] = [
   "###-###"
 ];
 
-},{}],532:[function(require,module,exports){
+},{}],511:[function(require,module,exports){
 module["exports"] = [
   "강원",
   "경기",
@@ -33062,14 +30719,14 @@ module["exports"] = [
   "세종"
 ];
 
-},{}],533:[function(require,module,exports){
-arguments[4][532][0].apply(exports,arguments)
-},{"dup":532}],534:[function(require,module,exports){
+},{}],512:[function(require,module,exports){
+arguments[4][511][0].apply(exports,arguments)
+},{"dup":511}],513:[function(require,module,exports){
 module["exports"] = [
   "#{street_root}#{street_suffix}"
 ];
 
-},{}],535:[function(require,module,exports){
+},{}],514:[function(require,module,exports){
 module["exports"] = [
   "상계",
   "화곡",
@@ -33101,33 +30758,33 @@ module["exports"] = [
   "동탄"
 ];
 
-},{}],536:[function(require,module,exports){
+},{}],515:[function(require,module,exports){
 module["exports"] = [
   "읍",
   "면",
   "동"
 ];
 
-},{}],537:[function(require,module,exports){
+},{}],516:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
 company.prefix = require("./prefix");
 company.name = require("./name");
 
-},{"./name":538,"./prefix":539,"./suffix":540}],538:[function(require,module,exports){
+},{"./name":517,"./prefix":518,"./suffix":519}],517:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{Name.first_name}",
   "#{Name.first_name} #{suffix}"
 ];
 
-},{}],539:[function(require,module,exports){
+},{}],518:[function(require,module,exports){
 module["exports"] = [
   "주식회사",
   "한국"
 ];
 
-},{}],540:[function(require,module,exports){
+},{}],519:[function(require,module,exports){
 module["exports"] = [
   "연구소",
   "게임즈",
@@ -33137,7 +30794,7 @@ module["exports"] = [
   "코리아"
 ];
 
-},{}],541:[function(require,module,exports){
+},{}],520:[function(require,module,exports){
 var ko = {};
 module['exports'] = ko;
 ko.title = "Korean";
@@ -33148,7 +30805,7 @@ ko.internet = require("./internet");
 ko.lorem = require("./lorem");
 ko.name = require("./name");
 
-},{"./address":530,"./company":537,"./internet":544,"./lorem":545,"./name":548,"./phone_number":552}],542:[function(require,module,exports){
+},{"./address":509,"./company":516,"./internet":523,"./lorem":524,"./name":527,"./phone_number":531}],521:[function(require,module,exports){
 module["exports"] = [
   "co.kr",
   "com",
@@ -33160,7 +30817,7 @@ module["exports"] = [
   "org"
 ];
 
-},{}],543:[function(require,module,exports){
+},{}],522:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.co.kr",
@@ -33168,11 +30825,11 @@ module["exports"] = [
   "naver.com"
 ];
 
-},{}],544:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":542,"./free_email":543,"dup":66}],545:[function(require,module,exports){
-arguments[4][67][0].apply(exports,arguments)
-},{"./words":546,"dup":67}],546:[function(require,module,exports){
+},{}],523:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":521,"./free_email":522,"dup":45}],524:[function(require,module,exports){
+arguments[4][46][0].apply(exports,arguments)
+},{"./words":525,"dup":46}],525:[function(require,module,exports){
 module["exports"] = [
   "국가는",
   "법률이",
@@ -33304,7 +30961,7 @@ module["exports"] = [
   "가진다."
 ];
 
-},{}],547:[function(require,module,exports){
+},{}],526:[function(require,module,exports){
 module["exports"] = [
   "서연",
   "민서",
@@ -33329,9 +30986,9 @@ module["exports"] = [
   "은주"
 ];
 
-},{}],548:[function(require,module,exports){
-arguments[4][522][0].apply(exports,arguments)
-},{"./first_name":547,"./last_name":549,"./name":550,"dup":522}],549:[function(require,module,exports){
+},{}],527:[function(require,module,exports){
+arguments[4][501][0].apply(exports,arguments)
+},{"./first_name":526,"./last_name":528,"./name":529,"dup":501}],528:[function(require,module,exports){
 module["exports"] = [
   "김",
   "이",
@@ -33355,29 +31012,29 @@ module["exports"] = [
   "홍"
 ];
 
-},{}],550:[function(require,module,exports){
-arguments[4][524][0].apply(exports,arguments)
-},{"dup":524}],551:[function(require,module,exports){
+},{}],529:[function(require,module,exports){
+arguments[4][503][0].apply(exports,arguments)
+},{"dup":503}],530:[function(require,module,exports){
 module["exports"] = [
   "0#-#####-####",
   "0##-###-####",
   "0##-####-####"
 ];
 
-},{}],552:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":551,"dup":76}],553:[function(require,module,exports){
+},{}],531:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":530,"dup":55}],532:[function(require,module,exports){
 module["exports"] = [
   "#",
   "##"
 ];
 
-},{}],554:[function(require,module,exports){
+},{}],533:[function(require,module,exports){
 module["exports"] = [
   "#{city_root}#{city_suffix}"
 ];
 
-},{}],555:[function(require,module,exports){
+},{}],534:[function(require,module,exports){
 module["exports"] = [
   "Fet",
   "Gjes",
@@ -33398,7 +31055,7 @@ module["exports"] = [
   "Vest"
 ];
 
-},{}],556:[function(require,module,exports){
+},{}],535:[function(require,module,exports){
 module["exports"] = [
   "berg",
   "borg",
@@ -33430,7 +31087,7 @@ module["exports"] = [
   "ås"
 ];
 
-},{}],557:[function(require,module,exports){
+},{}],536:[function(require,module,exports){
 module["exports"] = [
   "sgate",
   "svei",
@@ -33440,12 +31097,12 @@ module["exports"] = [
   "veien"
 ];
 
-},{}],558:[function(require,module,exports){
+},{}],537:[function(require,module,exports){
 module["exports"] = [
   "Norge"
 ];
 
-},{}],559:[function(require,module,exports){
+},{}],538:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_root = require("./city_root");
@@ -33463,7 +31120,7 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":553,"./city":554,"./city_root":555,"./city_suffix":556,"./common_street_suffix":557,"./default_country":558,"./postcode":560,"./secondary_address":561,"./state":562,"./street_address":563,"./street_name":564,"./street_prefix":565,"./street_root":566,"./street_suffix":567}],560:[function(require,module,exports){
+},{"./building_number":532,"./city":533,"./city_root":534,"./city_suffix":535,"./common_street_suffix":536,"./default_country":537,"./postcode":539,"./secondary_address":540,"./state":541,"./street_address":542,"./street_name":543,"./street_prefix":544,"./street_root":545,"./street_suffix":546}],539:[function(require,module,exports){
 module["exports"] = [
   "####",
   "####",
@@ -33471,21 +31128,21 @@ module["exports"] = [
   "0###"
 ];
 
-},{}],561:[function(require,module,exports){
+},{}],540:[function(require,module,exports){
 module["exports"] = [
   "Leil. ###",
   "Oppgang A",
   "Oppgang B"
 ];
 
-},{}],562:[function(require,module,exports){
+},{}],541:[function(require,module,exports){
 module["exports"] = [
   ""
 ];
 
-},{}],563:[function(require,module,exports){
-arguments[4][54][0].apply(exports,arguments)
-},{"dup":54}],564:[function(require,module,exports){
+},{}],542:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"dup":33}],543:[function(require,module,exports){
 module["exports"] = [
   "#{street_root}#{street_suffix}",
   "#{street_prefix} #{street_root}#{street_suffix}",
@@ -33493,7 +31150,7 @@ module["exports"] = [
   "#{Name.last_name}#{common_street_suffix}"
 ];
 
-},{}],565:[function(require,module,exports){
+},{}],544:[function(require,module,exports){
 module["exports"] = [
   "Øvre",
   "Nedre",
@@ -33503,7 +31160,7 @@ module["exports"] = [
   "Vestre"
 ];
 
-},{}],566:[function(require,module,exports){
+},{}],545:[function(require,module,exports){
 module["exports"] = [
   "Eike",
   "Bjørke",
@@ -33540,7 +31197,7 @@ module["exports"] = [
   "Sjø"
 ];
 
-},{}],567:[function(require,module,exports){
+},{}],546:[function(require,module,exports){
 module["exports"] = [
   "alléen",
   "bakken",
@@ -33590,16 +31247,16 @@ module["exports"] = [
   "åsen"
 ];
 
-},{}],568:[function(require,module,exports){
-arguments[4][112][0].apply(exports,arguments)
-},{"./name":569,"./suffix":570,"dup":112}],569:[function(require,module,exports){
+},{}],547:[function(require,module,exports){
+arguments[4][91][0].apply(exports,arguments)
+},{"./name":548,"./suffix":549,"dup":91}],548:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name}-#{Name.last_name}",
   "#{Name.last_name}, #{Name.last_name} og #{Name.last_name}"
 ];
 
-},{}],570:[function(require,module,exports){
+},{}],549:[function(require,module,exports){
 module["exports"] = [
   "Gruppen",
   "AS",
@@ -33609,7 +31266,7 @@ module["exports"] = [
   "og Sønner"
 ];
 
-},{}],571:[function(require,module,exports){
+},{}],550:[function(require,module,exports){
 var nb_NO = {};
 module['exports'] = nb_NO;
 nb_NO.title = "Norwegian";
@@ -33619,7 +31276,7 @@ nb_NO.internet = require("./internet");
 nb_NO.name = require("./name");
 nb_NO.phone_number = require("./phone_number");
 
-},{"./address":559,"./company":568,"./internet":573,"./name":576,"./phone_number":583}],572:[function(require,module,exports){
+},{"./address":538,"./company":547,"./internet":552,"./name":555,"./phone_number":562}],551:[function(require,module,exports){
 module["exports"] = [
   "no",
   "com",
@@ -33627,9 +31284,9 @@ module["exports"] = [
   "org"
 ];
 
-},{}],573:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":572,"dup":117}],574:[function(require,module,exports){
+},{}],552:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":551,"dup":96}],553:[function(require,module,exports){
 module["exports"] = [
   "Emma",
   "Sara",
@@ -33683,7 +31340,7 @@ module["exports"] = [
   "Madeleine"
 ];
 
-},{}],575:[function(require,module,exports){
+},{}],554:[function(require,module,exports){
 module["exports"] = [
   "Emma",
   "Sara",
@@ -33787,7 +31444,7 @@ module["exports"] = [
   "Aksel"
 ];
 
-},{}],576:[function(require,module,exports){
+},{}],555:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
@@ -33798,7 +31455,7 @@ name.prefix = require("./prefix");
 name.suffix = require("./suffix");
 name.name = require("./name");
 
-},{"./feminine_name":574,"./first_name":575,"./last_name":577,"./masculine_name":578,"./name":579,"./prefix":580,"./suffix":581}],577:[function(require,module,exports){
+},{"./feminine_name":553,"./first_name":554,"./last_name":556,"./masculine_name":557,"./name":558,"./prefix":559,"./suffix":560}],556:[function(require,module,exports){
 module["exports"] = [
   "Johansen",
   "Hansen",
@@ -33902,7 +31559,7 @@ module["exports"] = [
   "Edvardsen"
 ];
 
-},{}],578:[function(require,module,exports){
+},{}],557:[function(require,module,exports){
 module["exports"] = [
   "Markus",
   "Mathias",
@@ -33956,7 +31613,7 @@ module["exports"] = [
   "Aksel"
 ];
 
-},{}],579:[function(require,module,exports){
+},{}],558:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{first_name} #{last_name}",
   "#{first_name} #{last_name} #{suffix}",
@@ -33966,13 +31623,13 @@ module["exports"] = [
   "#{first_name} #{last_name}"
 ];
 
-},{}],580:[function(require,module,exports){
+},{}],559:[function(require,module,exports){
 module["exports"] = [
   "Dr.",
   "Prof."
 ];
 
-},{}],581:[function(require,module,exports){
+},{}],560:[function(require,module,exports){
 module["exports"] = [
   "Jr.",
   "Sr.",
@@ -33983,7 +31640,7 @@ module["exports"] = [
   "V"
 ];
 
-},{}],582:[function(require,module,exports){
+},{}],561:[function(require,module,exports){
 module["exports"] = [
   "########",
   "## ## ## ##",
@@ -33991,9 +31648,9 @@ module["exports"] = [
   "+47 ## ## ## ##"
 ];
 
-},{}],583:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":582,"dup":76}],584:[function(require,module,exports){
+},{}],562:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":561,"dup":55}],563:[function(require,module,exports){
 module["exports"] = [
   "Bhaktapur",
   "Biratnagar",
@@ -34013,12 +31670,12 @@ module["exports"] = [
   "Pokhara"
 ];
 
-},{}],585:[function(require,module,exports){
+},{}],564:[function(require,module,exports){
 module["exports"] = [
   "Nepal"
 ];
 
-},{}],586:[function(require,module,exports){
+},{}],565:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.postcode = require("./postcode");
@@ -34026,12 +31683,12 @@ address.state = require("./state");
 address.city = require("./city");
 address.default_country = require("./default_country");
 
-},{"./city":584,"./default_country":585,"./postcode":587,"./state":588}],587:[function(require,module,exports){
+},{"./city":563,"./default_country":564,"./postcode":566,"./state":567}],566:[function(require,module,exports){
 module["exports"] = [
   0
 ];
 
-},{}],588:[function(require,module,exports){
+},{}],567:[function(require,module,exports){
 module["exports"] = [
   "Baglung",
   "Banke",
@@ -34088,9 +31745,9 @@ module["exports"] = [
   "Terhathum"
 ];
 
-},{}],589:[function(require,module,exports){
-arguments[4][212][0].apply(exports,arguments)
-},{"./suffix":590,"dup":212}],590:[function(require,module,exports){
+},{}],568:[function(require,module,exports){
+arguments[4][191][0].apply(exports,arguments)
+},{"./suffix":569,"dup":191}],569:[function(require,module,exports){
 module["exports"] = [
   "Pvt Ltd",
   "Group",
@@ -34098,7 +31755,7 @@ module["exports"] = [
   "Limited"
 ];
 
-},{}],591:[function(require,module,exports){
+},{}],570:[function(require,module,exports){
 var nep = {};
 module['exports'] = nep;
 nep.title = "Nepalese";
@@ -34108,7 +31765,7 @@ nep.internet = require("./internet");
 nep.company = require("./company");
 nep.phone_number = require("./phone_number");
 
-},{"./address":586,"./company":589,"./internet":594,"./name":596,"./phone_number":599}],592:[function(require,module,exports){
+},{"./address":565,"./company":568,"./internet":573,"./name":575,"./phone_number":578}],571:[function(require,module,exports){
 module["exports"] = [
   "np",
   "com",
@@ -34117,7 +31774,7 @@ module["exports"] = [
   "org"
 ];
 
-},{}],593:[function(require,module,exports){
+},{}],572:[function(require,module,exports){
 module["exports"] = [
   "worldlink.com.np",
   "gmail.com",
@@ -34125,9 +31782,9 @@ module["exports"] = [
   "hotmail.com"
 ];
 
-},{}],594:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":592,"./free_email":593,"dup":66}],595:[function(require,module,exports){
+},{}],573:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":571,"./free_email":572,"dup":45}],574:[function(require,module,exports){
 module["exports"] = [
   "Aarav",
   "Ajita",
@@ -34186,9 +31843,9 @@ module["exports"] = [
   "Sushant"
 ];
 
-},{}],596:[function(require,module,exports){
-arguments[4][218][0].apply(exports,arguments)
-},{"./first_name":595,"./last_name":597,"dup":218}],597:[function(require,module,exports){
+},{}],575:[function(require,module,exports){
+arguments[4][197][0].apply(exports,arguments)
+},{"./first_name":574,"./last_name":576,"dup":197}],576:[function(require,module,exports){
 module["exports"] = [
   "Adhikari",
   "Aryal",
@@ -34231,16 +31888,16 @@ module["exports"] = [
   "Thapa"
 ];
 
-},{}],598:[function(require,module,exports){
+},{}],577:[function(require,module,exports){
 module["exports"] = [
   "##-#######",
   "+977-#-#######",
   "+977########"
 ];
 
-},{}],599:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":598,"dup":76}],600:[function(require,module,exports){
+},{}],578:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":577,"dup":55}],579:[function(require,module,exports){
 module["exports"] = [
   "#",
   "##",
@@ -34253,7 +31910,7 @@ module["exports"] = [
   "### III"
 ];
 
-},{}],601:[function(require,module,exports){
+},{}],580:[function(require,module,exports){
 module["exports"] = [
   "#{Name.first_name}#{city_suffix}",
   "#{Name.last_name}#{city_suffix}",
@@ -34261,7 +31918,7 @@ module["exports"] = [
   "#{city_prefix} #{Name.last_name}#{city_suffix}"
 ];
 
-},{}],602:[function(require,module,exports){
+},{}],581:[function(require,module,exports){
 module["exports"] = [
   "Noord",
   "Oost",
@@ -34271,7 +31928,7 @@ module["exports"] = [
   "Oud"
 ];
 
-},{}],603:[function(require,module,exports){
+},{}],582:[function(require,module,exports){
 module["exports"] = [
   "dam",
   "berg",
@@ -34304,7 +31961,7 @@ module["exports"] = [
   "meer"
 ];
 
-},{}],604:[function(require,module,exports){
+},{}],583:[function(require,module,exports){
 module["exports"] = [
   "Afghanistan",
   "Akrotiri",
@@ -34564,12 +32221,12 @@ module["exports"] = [
   "Zwitserland"
 ];
 
-},{}],605:[function(require,module,exports){
+},{}],584:[function(require,module,exports){
 module["exports"] = [
   "Nederland"
 ];
 
-},{}],606:[function(require,module,exports){
+},{}],585:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -34585,19 +32242,19 @@ address.postcode = require("./postcode");
 address.state = require("./state");
 address.default_country = require("./default_country");
 
-},{"./building_number":600,"./city":601,"./city_prefix":602,"./city_suffix":603,"./country":604,"./default_country":605,"./postcode":607,"./secondary_address":608,"./state":609,"./street_address":610,"./street_name":611,"./street_suffix":612}],607:[function(require,module,exports){
+},{"./building_number":579,"./city":580,"./city_prefix":581,"./city_suffix":582,"./country":583,"./default_country":584,"./postcode":586,"./secondary_address":587,"./state":588,"./street_address":589,"./street_name":590,"./street_suffix":591}],586:[function(require,module,exports){
 module["exports"] = [
   "#### ??"
 ];
 
-},{}],608:[function(require,module,exports){
+},{}],587:[function(require,module,exports){
 module["exports"] = [
   "1 hoog",
   "2 hoog",
   "3 hoog"
 ];
 
-},{}],609:[function(require,module,exports){
+},{}],588:[function(require,module,exports){
 module["exports"] = [
   "Noord-Holland",
   "Zuid-Holland",
@@ -34613,11 +32270,11 @@ module["exports"] = [
   "Flevoland"
 ];
 
-},{}],610:[function(require,module,exports){
-arguments[4][54][0].apply(exports,arguments)
-},{"dup":54}],611:[function(require,module,exports){
-arguments[4][517][0].apply(exports,arguments)
-},{"dup":517}],612:[function(require,module,exports){
+},{}],589:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"dup":33}],590:[function(require,module,exports){
+arguments[4][496][0].apply(exports,arguments)
+},{"dup":496}],591:[function(require,module,exports){
 module["exports"] = [
   "straat",
   "laan",
@@ -34626,9 +32283,9 @@ module["exports"] = [
   "park"
 ];
 
-},{}],613:[function(require,module,exports){
-arguments[4][212][0].apply(exports,arguments)
-},{"./suffix":614,"dup":212}],614:[function(require,module,exports){
+},{}],592:[function(require,module,exports){
+arguments[4][191][0].apply(exports,arguments)
+},{"./suffix":593,"dup":191}],593:[function(require,module,exports){
 module["exports"] = [
   "BV",
   "V.O.F.",
@@ -34636,7 +32293,7 @@ module["exports"] = [
   "en Zonen"
 ];
 
-},{}],615:[function(require,module,exports){
+},{}],594:[function(require,module,exports){
 var nl = {};
 module['exports'] = nl;
 nl.title = "Dutch";
@@ -34647,7 +32304,7 @@ nl.lorem = require("./lorem");
 nl.name = require("./name");
 nl.phone_number = require("./phone_number");
 
-},{"./address":606,"./company":613,"./internet":618,"./lorem":619,"./name":623,"./phone_number":630}],616:[function(require,module,exports){
+},{"./address":585,"./company":592,"./internet":597,"./lorem":598,"./name":602,"./phone_number":609}],595:[function(require,module,exports){
 module["exports"] = [
   "nl",
   "com",
@@ -34655,17 +32312,17 @@ module["exports"] = [
   "org"
 ];
 
-},{}],617:[function(require,module,exports){
-arguments[4][65][0].apply(exports,arguments)
-},{"dup":65}],618:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":616,"./free_email":617,"dup":66}],619:[function(require,module,exports){
-arguments[4][190][0].apply(exports,arguments)
-},{"./supplemental":620,"./words":621,"dup":190}],620:[function(require,module,exports){
-arguments[4][191][0].apply(exports,arguments)
-},{"dup":191}],621:[function(require,module,exports){
-arguments[4][68][0].apply(exports,arguments)
-},{"dup":68}],622:[function(require,module,exports){
+},{}],596:[function(require,module,exports){
+arguments[4][44][0].apply(exports,arguments)
+},{"dup":44}],597:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":595,"./free_email":596,"dup":45}],598:[function(require,module,exports){
+arguments[4][169][0].apply(exports,arguments)
+},{"./supplemental":599,"./words":600,"dup":169}],599:[function(require,module,exports){
+arguments[4][170][0].apply(exports,arguments)
+},{"dup":170}],600:[function(require,module,exports){
+arguments[4][47][0].apply(exports,arguments)
+},{"dup":47}],601:[function(require,module,exports){
 module["exports"] = [
   "Amber",
   "Anna",
@@ -34719,7 +32376,7 @@ module["exports"] = [
   "Tom"
 ];
 
-},{}],623:[function(require,module,exports){
+},{}],602:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
@@ -34729,7 +32386,7 @@ name.prefix = require("./prefix");
 name.suffix = require("./suffix");
 name.name = require("./name");
 
-},{"./first_name":622,"./last_name":624,"./name":625,"./prefix":626,"./suffix":627,"./tussenvoegsel":628}],624:[function(require,module,exports){
+},{"./first_name":601,"./last_name":603,"./name":604,"./prefix":605,"./suffix":606,"./tussenvoegsel":607}],603:[function(require,module,exports){
 module["exports"] = [
   "Bakker",
   "Beek",
@@ -34783,7 +32440,7 @@ module["exports"] = [
   "Wit"
 ];
 
-},{}],625:[function(require,module,exports){
+},{}],604:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{first_name} #{last_name}",
   "#{first_name} #{last_name} #{suffix}",
@@ -34793,7 +32450,7 @@ module["exports"] = [
   "#{first_name} #{tussenvoegsel} #{last_name}"
 ];
 
-},{}],626:[function(require,module,exports){
+},{}],605:[function(require,module,exports){
 module["exports"] = [
   "Dhr.",
   "Mevr. Dr.",
@@ -34802,9 +32459,9 @@ module["exports"] = [
   "Prof."
 ];
 
-},{}],627:[function(require,module,exports){
-arguments[4][581][0].apply(exports,arguments)
-},{"dup":581}],628:[function(require,module,exports){
+},{}],606:[function(require,module,exports){
+arguments[4][560][0].apply(exports,arguments)
+},{"dup":560}],607:[function(require,module,exports){
 module["exports"] = [
   "van",
   "van de",
@@ -34815,7 +32472,7 @@ module["exports"] = [
   "den"
 ];
 
-},{}],629:[function(require,module,exports){
+},{}],608:[function(require,module,exports){
 module["exports"] = [
   "(####) ######",
   "##########",
@@ -34823,13 +32480,13 @@ module["exports"] = [
   "06 #### ####"
 ];
 
-},{}],630:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":629,"dup":76}],631:[function(require,module,exports){
-arguments[4][120][0].apply(exports,arguments)
-},{"dup":120}],632:[function(require,module,exports){
-arguments[4][78][0].apply(exports,arguments)
-},{"dup":78}],633:[function(require,module,exports){
+},{}],609:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":608,"dup":55}],610:[function(require,module,exports){
+arguments[4][99][0].apply(exports,arguments)
+},{"dup":99}],611:[function(require,module,exports){
+arguments[4][57][0].apply(exports,arguments)
+},{"dup":57}],612:[function(require,module,exports){
 module["exports"] = [
   "Aleksandrów Kujawski",
   "Aleksandrów Łódzki",
@@ -35741,7 +33398,7 @@ module["exports"] = [
   "Żywiec"
 ];
 
-},{}],634:[function(require,module,exports){
+},{}],613:[function(require,module,exports){
 module["exports"] = [
   "Afganistan",
   "Albania",
@@ -35944,12 +33601,12 @@ module["exports"] = [
   "Zjednoczone Emiraty Arabskie"
 ];
 
-},{}],635:[function(require,module,exports){
+},{}],614:[function(require,module,exports){
 module["exports"] = [
   "Polska"
 ];
 
-},{}],636:[function(require,module,exports){
+},{}],615:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.country = require("./country");
@@ -35965,14 +33622,14 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":631,"./city":632,"./city_name":633,"./country":634,"./default_country":635,"./postcode":637,"./secondary_address":638,"./state":639,"./state_abbr":640,"./street_address":641,"./street_name":642,"./street_prefix":643}],637:[function(require,module,exports){
+},{"./building_number":610,"./city":611,"./city_name":612,"./country":613,"./default_country":614,"./postcode":616,"./secondary_address":617,"./state":618,"./state_abbr":619,"./street_address":620,"./street_name":621,"./street_prefix":622}],616:[function(require,module,exports){
 module["exports"] = [
   "##-###"
 ];
 
-},{}],638:[function(require,module,exports){
-arguments[4][131][0].apply(exports,arguments)
-},{"dup":131}],639:[function(require,module,exports){
+},{}],617:[function(require,module,exports){
+arguments[4][110][0].apply(exports,arguments)
+},{"dup":110}],618:[function(require,module,exports){
 module["exports"] = [
   "Dolnośląskie",
   "Kujawsko-pomorskie",
@@ -35992,7 +33649,7 @@ module["exports"] = [
   "Zachodniopomorskie"
 ];
 
-},{}],640:[function(require,module,exports){
+},{}],619:[function(require,module,exports){
 module["exports"] = [
   "DŚ",
   "KP",
@@ -36012,20 +33669,20 @@ module["exports"] = [
   "ZP"
 ];
 
-},{}],641:[function(require,module,exports){
-arguments[4][54][0].apply(exports,arguments)
-},{"dup":54}],642:[function(require,module,exports){
+},{}],620:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"dup":33}],621:[function(require,module,exports){
 module["exports"] = [
   "#{street_prefix} #{Name.last_name}"
 ];
 
-},{}],643:[function(require,module,exports){
+},{}],622:[function(require,module,exports){
 module["exports"] = [
   "ul.",
   "al."
 ];
 
-},{}],644:[function(require,module,exports){
+},{}],623:[function(require,module,exports){
 module["exports"] = [
   "50-###-##-##",
   "51-###-##-##",
@@ -36041,19 +33698,19 @@ module["exports"] = [
   "88-###-##-##"
 ];
 
-},{}],645:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":644,"dup":58}],646:[function(require,module,exports){
-arguments[4][152][0].apply(exports,arguments)
-},{"dup":152}],647:[function(require,module,exports){
-arguments[4][153][0].apply(exports,arguments)
-},{"dup":153}],648:[function(require,module,exports){
-arguments[4][154][0].apply(exports,arguments)
-},{"dup":154}],649:[function(require,module,exports){
-arguments[4][155][0].apply(exports,arguments)
-},{"dup":155}],650:[function(require,module,exports){
-arguments[4][156][0].apply(exports,arguments)
-},{"dup":156}],651:[function(require,module,exports){
+},{}],624:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":623,"dup":37}],625:[function(require,module,exports){
+arguments[4][131][0].apply(exports,arguments)
+},{"dup":131}],626:[function(require,module,exports){
+arguments[4][132][0].apply(exports,arguments)
+},{"dup":132}],627:[function(require,module,exports){
+arguments[4][133][0].apply(exports,arguments)
+},{"dup":133}],628:[function(require,module,exports){
+arguments[4][134][0].apply(exports,arguments)
+},{"dup":134}],629:[function(require,module,exports){
+arguments[4][135][0].apply(exports,arguments)
+},{"dup":135}],630:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
@@ -36065,13 +33722,13 @@ company.bs_adjective = require("./bs_adjective");
 company.bs_noun = require("./bs_noun");
 company.name = require("./name");
 
-},{"./adjetive":646,"./bs_adjective":647,"./bs_noun":648,"./bs_verb":649,"./descriptor":650,"./name":652,"./noun":653,"./suffix":654}],652:[function(require,module,exports){
-arguments[4][158][0].apply(exports,arguments)
-},{"dup":158}],653:[function(require,module,exports){
-arguments[4][159][0].apply(exports,arguments)
-},{"dup":159}],654:[function(require,module,exports){
-arguments[4][160][0].apply(exports,arguments)
-},{"dup":160}],655:[function(require,module,exports){
+},{"./adjetive":625,"./bs_adjective":626,"./bs_noun":627,"./bs_verb":628,"./descriptor":629,"./name":631,"./noun":632,"./suffix":633}],631:[function(require,module,exports){
+arguments[4][137][0].apply(exports,arguments)
+},{"dup":137}],632:[function(require,module,exports){
+arguments[4][138][0].apply(exports,arguments)
+},{"dup":138}],633:[function(require,module,exports){
+arguments[4][139][0].apply(exports,arguments)
+},{"dup":139}],634:[function(require,module,exports){
 var pl = {};
 module['exports'] = pl;
 pl.title = "Polish";
@@ -36083,7 +33740,7 @@ pl.lorem = require("./lorem");
 pl.phone_number = require("./phone_number");
 pl.cell_phone = require("./cell_phone");
 
-},{"./address":636,"./cell_phone":645,"./company":651,"./internet":658,"./lorem":659,"./name":663,"./phone_number":669}],656:[function(require,module,exports){
+},{"./address":615,"./cell_phone":624,"./company":630,"./internet":637,"./lorem":638,"./name":642,"./phone_number":648}],635:[function(require,module,exports){
 module["exports"] = [
   "com",
   "pl",
@@ -36092,17 +33749,17 @@ module["exports"] = [
   "org"
 ];
 
-},{}],657:[function(require,module,exports){
-arguments[4][65][0].apply(exports,arguments)
-},{"dup":65}],658:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":656,"./free_email":657,"dup":66}],659:[function(require,module,exports){
-arguments[4][190][0].apply(exports,arguments)
-},{"./supplemental":660,"./words":661,"dup":190}],660:[function(require,module,exports){
-arguments[4][191][0].apply(exports,arguments)
-},{"dup":191}],661:[function(require,module,exports){
-arguments[4][68][0].apply(exports,arguments)
-},{"dup":68}],662:[function(require,module,exports){
+},{}],636:[function(require,module,exports){
+arguments[4][44][0].apply(exports,arguments)
+},{"dup":44}],637:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":635,"./free_email":636,"dup":45}],638:[function(require,module,exports){
+arguments[4][169][0].apply(exports,arguments)
+},{"./supplemental":639,"./words":640,"dup":169}],639:[function(require,module,exports){
+arguments[4][170][0].apply(exports,arguments)
+},{"dup":170}],640:[function(require,module,exports){
+arguments[4][47][0].apply(exports,arguments)
+},{"dup":47}],641:[function(require,module,exports){
 module["exports"] = [
   "Aaron",
   "Abraham",
@@ -36515,9 +34172,9 @@ module["exports"] = [
   "Zoe"
 ];
 
-},{}],663:[function(require,module,exports){
-arguments[4][425][0].apply(exports,arguments)
-},{"./first_name":662,"./last_name":664,"./name":665,"./prefix":666,"./title":667,"dup":425}],664:[function(require,module,exports){
+},{}],642:[function(require,module,exports){
+arguments[4][404][0].apply(exports,arguments)
+},{"./first_name":641,"./last_name":643,"./name":644,"./prefix":645,"./title":646,"dup":404}],643:[function(require,module,exports){
 module["exports"] = [
   "Adamczak",
   "Adamczyk",
@@ -37225,17 +34882,17 @@ module["exports"] = [
   "Żyła"
 ];
 
-},{}],665:[function(require,module,exports){
-arguments[4][470][0].apply(exports,arguments)
-},{"dup":470}],666:[function(require,module,exports){
+},{}],644:[function(require,module,exports){
+arguments[4][449][0].apply(exports,arguments)
+},{"dup":449}],645:[function(require,module,exports){
 module["exports"] = [
   "Pan",
   "Pani"
 ];
 
-},{}],667:[function(require,module,exports){
-arguments[4][199][0].apply(exports,arguments)
-},{"dup":199}],668:[function(require,module,exports){
+},{}],646:[function(require,module,exports){
+arguments[4][178][0].apply(exports,arguments)
+},{"dup":178}],647:[function(require,module,exports){
 module["exports"] = [
   "12-###-##-##",
   "13-###-##-##",
@@ -37288,11 +34945,11 @@ module["exports"] = [
   "95-###-##-##"
 ];
 
-},{}],669:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":668,"dup":76}],670:[function(require,module,exports){
-arguments[4][120][0].apply(exports,arguments)
-},{"dup":120}],671:[function(require,module,exports){
+},{}],648:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":647,"dup":55}],649:[function(require,module,exports){
+arguments[4][99][0].apply(exports,arguments)
+},{"dup":99}],650:[function(require,module,exports){
 module["exports"] = [
   "Nova",
   "Velha",
@@ -37301,7 +34958,7 @@ module["exports"] = [
   "Município de"
 ];
 
-},{}],672:[function(require,module,exports){
+},{}],651:[function(require,module,exports){
 module["exports"] = [
   "do Descoberto",
   "de Nossa Senhora",
@@ -37309,7 +34966,7 @@ module["exports"] = [
   "do Sul"
 ];
 
-},{}],673:[function(require,module,exports){
+},{}],652:[function(require,module,exports){
 module["exports"] = [
   "Afeganistão",
   "Albânia",
@@ -37550,12 +35207,12 @@ module["exports"] = [
   "Zimbábue"
 ];
 
-},{}],674:[function(require,module,exports){
+},{}],653:[function(require,module,exports){
 module["exports"] = [
   "Brasil"
 ];
 
-},{}],675:[function(require,module,exports){
+},{}],654:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -37569,13 +35226,13 @@ address.state = require("./state");
 address.state_abbr = require("./state_abbr");
 address.default_country = require("./default_country");
 
-},{"./building_number":670,"./city_prefix":671,"./city_suffix":672,"./country":673,"./default_country":674,"./postcode":676,"./secondary_address":677,"./state":678,"./state_abbr":679,"./street_suffix":680}],676:[function(require,module,exports){
+},{"./building_number":649,"./city_prefix":650,"./city_suffix":651,"./country":652,"./default_country":653,"./postcode":655,"./secondary_address":656,"./state":657,"./state_abbr":658,"./street_suffix":659}],655:[function(require,module,exports){
 module["exports"] = [
   "#####",
   "#####-###"
 ];
 
-},{}],677:[function(require,module,exports){
+},{}],656:[function(require,module,exports){
 module["exports"] = [
   "Apto. ###",
   "Sobrado ##",
@@ -37584,7 +35241,7 @@ module["exports"] = [
   "Quadra ##"
 ];
 
-},{}],678:[function(require,module,exports){
+},{}],657:[function(require,module,exports){
 module["exports"] = [
   "Acre",
   "Alagoas",
@@ -37615,7 +35272,7 @@ module["exports"] = [
   "Tocantins"
 ];
 
-},{}],679:[function(require,module,exports){
+},{}],658:[function(require,module,exports){
 module["exports"] = [
   "AC",
   "AL",
@@ -37643,7 +35300,7 @@ module["exports"] = [
   "SP"
 ];
 
-},{}],680:[function(require,module,exports){
+},{}],659:[function(require,module,exports){
 module["exports"] = [
   "Rua",
   "Avenida",
@@ -37655,16 +35312,16 @@ module["exports"] = [
   "Rodovia"
 ];
 
-},{}],681:[function(require,module,exports){
-arguments[4][112][0].apply(exports,arguments)
-},{"./name":682,"./suffix":683,"dup":112}],682:[function(require,module,exports){
+},{}],660:[function(require,module,exports){
+arguments[4][91][0].apply(exports,arguments)
+},{"./name":661,"./suffix":662,"dup":91}],661:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name}-#{Name.last_name}",
   "#{Name.last_name}, #{Name.last_name} e #{Name.last_name}"
 ];
 
-},{}],683:[function(require,module,exports){
+},{}],662:[function(require,module,exports){
 module["exports"] = [
   "S.A.",
   "LTDA",
@@ -37672,7 +35329,7 @@ module["exports"] = [
   "Comércio"
 ];
 
-},{}],684:[function(require,module,exports){
+},{}],663:[function(require,module,exports){
 var pt_BR = {};
 module['exports'] = pt_BR;
 pt_BR.title = "Portuguese (Brazil)";
@@ -37683,7 +35340,7 @@ pt_BR.lorem = require("./lorem");
 pt_BR.name = require("./name");
 pt_BR.phone_number = require("./phone_number");
 
-},{"./address":675,"./company":681,"./internet":687,"./lorem":688,"./name":691,"./phone_number":696}],685:[function(require,module,exports){
+},{"./address":654,"./company":660,"./internet":666,"./lorem":667,"./name":670,"./phone_number":675}],664:[function(require,module,exports){
 module["exports"] = [
   "br",
   "com",
@@ -37694,7 +35351,7 @@ module["exports"] = [
   "org"
 ];
 
-},{}],686:[function(require,module,exports){
+},{}],665:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "yahoo.com",
@@ -37703,13 +35360,13 @@ module["exports"] = [
   "bol.com.br"
 ];
 
-},{}],687:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":685,"./free_email":686,"dup":66}],688:[function(require,module,exports){
-arguments[4][67][0].apply(exports,arguments)
-},{"./words":689,"dup":67}],689:[function(require,module,exports){
-arguments[4][68][0].apply(exports,arguments)
-},{"dup":68}],690:[function(require,module,exports){
+},{}],666:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":664,"./free_email":665,"dup":45}],667:[function(require,module,exports){
+arguments[4][46][0].apply(exports,arguments)
+},{"./words":668,"dup":46}],668:[function(require,module,exports){
+arguments[4][47][0].apply(exports,arguments)
+},{"dup":47}],669:[function(require,module,exports){
 module["exports"] = [
   "Alessandro",
   "Alessandra",
@@ -37804,7 +35461,7 @@ module["exports"] = [
   "Warley"
 ];
 
-},{}],691:[function(require,module,exports){
+},{}],670:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
@@ -37812,7 +35469,7 @@ name.last_name = require("./last_name");
 name.prefix = require("./prefix");
 name.suffix = require("./suffix");
 
-},{"./first_name":690,"./last_name":692,"./prefix":693,"./suffix":694}],692:[function(require,module,exports){
+},{"./first_name":669,"./last_name":671,"./prefix":672,"./suffix":673}],671:[function(require,module,exports){
 module["exports"] = [
   "Silva",
   "Souza",
@@ -37838,7 +35495,7 @@ module["exports"] = [
   "Albuquerque"
 ];
 
-},{}],693:[function(require,module,exports){
+},{}],672:[function(require,module,exports){
 module["exports"] = [
   "Sr.",
   "Sra.",
@@ -37846,33 +35503,33 @@ module["exports"] = [
   "Dr."
 ];
 
-},{}],694:[function(require,module,exports){
+},{}],673:[function(require,module,exports){
 module["exports"] = [
   "Jr.",
   "Neto",
   "Filho"
 ];
 
-},{}],695:[function(require,module,exports){
+},{}],674:[function(require,module,exports){
 module["exports"] = [
   "(##) ####-####",
   "+55 (##) ####-####",
   "(##) #####-####"
 ];
 
-},{}],696:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":695,"dup":76}],697:[function(require,module,exports){
+},{}],675:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":674,"dup":55}],676:[function(require,module,exports){
 module["exports"] = [
   "###"
 ];
 
-},{}],698:[function(require,module,exports){
+},{}],677:[function(require,module,exports){
 module["exports"] = [
   "#{Address.city_name}"
 ];
 
-},{}],699:[function(require,module,exports){
+},{}],678:[function(require,module,exports){
 module["exports"] = [
   "Москва",
   "Владимир",
@@ -37922,7 +35579,7 @@ module["exports"] = [
   "Сочи"
 ];
 
-},{}],700:[function(require,module,exports){
+},{}],679:[function(require,module,exports){
 module["exports"] = [
   "Австралия",
   "Австрия",
@@ -38136,12 +35793,12 @@ module["exports"] = [
   "Япония"
 ];
 
-},{}],701:[function(require,module,exports){
+},{}],680:[function(require,module,exports){
 module["exports"] = [
   "Россия"
 ];
 
-},{}],702:[function(require,module,exports){
+},{}],681:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.country = require("./country");
@@ -38157,17 +35814,17 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":697,"./city":698,"./city_name":699,"./country":700,"./default_country":701,"./postcode":703,"./secondary_address":704,"./state":705,"./street_address":706,"./street_name":707,"./street_suffix":708,"./street_title":709}],703:[function(require,module,exports){
+},{"./building_number":676,"./city":677,"./city_name":678,"./country":679,"./default_country":680,"./postcode":682,"./secondary_address":683,"./state":684,"./street_address":685,"./street_name":686,"./street_suffix":687,"./street_title":688}],682:[function(require,module,exports){
 module["exports"] = [
   "######"
 ];
 
-},{}],704:[function(require,module,exports){
+},{}],683:[function(require,module,exports){
 module["exports"] = [
   "кв. ###"
 ];
 
-},{}],705:[function(require,module,exports){
+},{}],684:[function(require,module,exports){
 module["exports"] = [
   "Республика Адыгея",
   "Республика Башкортостан",
@@ -38257,18 +35914,18 @@ module["exports"] = [
   "Чеченская Республика"
 ];
 
-},{}],706:[function(require,module,exports){
+},{}],685:[function(require,module,exports){
 module["exports"] = [
   "#{street_name}, #{building_number}"
 ];
 
-},{}],707:[function(require,module,exports){
+},{}],686:[function(require,module,exports){
 module["exports"] = [
   "#{street_suffix} #{Address.street_title}",
   "#{Address.street_title} #{street_suffix}"
 ];
 
-},{}],708:[function(require,module,exports){
+},{}],687:[function(require,module,exports){
 module["exports"] = [
   "ул.",
   "улица",
@@ -38278,7 +35935,7 @@ module["exports"] = [
   "пл."
 ];
 
-},{}],709:[function(require,module,exports){
+},{}],688:[function(require,module,exports){
 module["exports"] = [
   "Советская",
   "Молодежная",
@@ -38383,7 +36040,7 @@ module["exports"] = [
   "Майская"
 ];
 
-},{}],710:[function(require,module,exports){
+},{}],689:[function(require,module,exports){
 module["exports"] = [
   "красный",
   "зеленый",
@@ -38418,7 +36075,7 @@ module["exports"] = [
   "серебряный"
 ];
 
-},{}],711:[function(require,module,exports){
+},{}],690:[function(require,module,exports){
 module["exports"] = [
   "Книги",
   "Фильмы",
@@ -38443,9 +36100,9 @@ module["exports"] = [
   "промышленное"
 ];
 
-},{}],712:[function(require,module,exports){
-arguments[4][150][0].apply(exports,arguments)
-},{"./color":710,"./department":711,"./product_name":713,"dup":150}],713:[function(require,module,exports){
+},{}],691:[function(require,module,exports){
+arguments[4][129][0].apply(exports,arguments)
+},{"./color":689,"./department":690,"./product_name":692,"dup":129}],692:[function(require,module,exports){
 module["exports"] = {
   "adjective": [
     "Маленький",
@@ -38481,9 +36138,9 @@ module["exports"] = {
   ]
 };
 
-},{}],714:[function(require,module,exports){
-arguments[4][459][0].apply(exports,arguments)
-},{"./name":715,"./prefix":716,"./suffix":717,"dup":459}],715:[function(require,module,exports){
+},{}],693:[function(require,module,exports){
+arguments[4][438][0].apply(exports,arguments)
+},{"./name":694,"./prefix":695,"./suffix":696,"dup":438}],694:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{Name.female_first_name}",
   "#{prefix} #{Name.male_first_name}",
@@ -38495,7 +36152,7 @@ module["exports"] = [
   "#{prefix} #{Address.city_name}#{suffix}#{suffix}#{suffix}"
 ];
 
-},{}],716:[function(require,module,exports){
+},{}],695:[function(require,module,exports){
 module["exports"] = [
   "ИП",
   "ООО",
@@ -38506,7 +36163,7 @@ module["exports"] = [
   "ОП"
 ];
 
-},{}],717:[function(require,module,exports){
+},{}],696:[function(require,module,exports){
 module["exports"] = [
   "Снаб",
   "Торг",
@@ -38515,9 +36172,9 @@ module["exports"] = [
   "Сбыт"
 ];
 
-},{}],718:[function(require,module,exports){
-arguments[4][172][0].apply(exports,arguments)
-},{"./month":719,"./weekday":720,"dup":172}],719:[function(require,module,exports){
+},{}],697:[function(require,module,exports){
+arguments[4][151][0].apply(exports,arguments)
+},{"./month":698,"./weekday":699,"dup":151}],698:[function(require,module,exports){
 // source: http://unicode.org/cldr/trac/browser/tags/release-27/common/main/ru.xml#L1734
 module["exports"] = {
   wide: [
@@ -38578,7 +36235,7 @@ module["exports"] = {
   ]
 };
 
-},{}],720:[function(require,module,exports){
+},{}],699:[function(require,module,exports){
 // source: http://unicode.org/cldr/trac/browser/tags/release-27/common/main/ru.xml#L1825
 module["exports"] = {
   wide: [
@@ -38619,7 +36276,7 @@ module["exports"] = {
   ]
 };
 
-},{}],721:[function(require,module,exports){
+},{}],700:[function(require,module,exports){
 var ru = {};
 module['exports'] = ru;
 ru.title = "Russian";
@@ -38632,7 +36289,7 @@ ru.commerce = require("./commerce");
 ru.company = require("./company");
 ru.date = require("./date");
 
-},{"./address":702,"./commerce":712,"./company":714,"./date":718,"./internet":724,"./name":728,"./phone_number":736}],722:[function(require,module,exports){
+},{"./address":681,"./commerce":691,"./company":693,"./date":697,"./internet":703,"./name":707,"./phone_number":715}],701:[function(require,module,exports){
 module["exports"] = [
   "com",
   "ru",
@@ -38642,7 +36299,7 @@ module["exports"] = [
   "org"
 ];
 
-},{}],723:[function(require,module,exports){
+},{}],702:[function(require,module,exports){
 module["exports"] = [
   "yandex.ru",
   "ya.ru",
@@ -38652,9 +36309,9 @@ module["exports"] = [
   "hotmail.com"
 ];
 
-},{}],724:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":722,"./free_email":723,"dup":66}],725:[function(require,module,exports){
+},{}],703:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":701,"./free_email":702,"dup":45}],704:[function(require,module,exports){
 module["exports"] = [
   "Анна",
   "Алёна",
@@ -38714,7 +36371,7 @@ module["exports"] = [
   "Юлия"
 ];
 
-},{}],726:[function(require,module,exports){
+},{}],705:[function(require,module,exports){
 module["exports"] = [
   "Смирнова",
   "Иванова",
@@ -38968,7 +36625,7 @@ module["exports"] = [
   "Турова"
 ];
 
-},{}],727:[function(require,module,exports){
+},{}],706:[function(require,module,exports){
 module["exports"] = [
   "Александровна",
   "Алексеевна",
@@ -39023,7 +36680,7 @@ module["exports"] = [
   "Ярославовна"
 ];
 
-},{}],728:[function(require,module,exports){
+},{}],707:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.male_first_name = require("./male_first_name");
@@ -39036,7 +36693,7 @@ name.prefix = require("./prefix");
 name.suffix = require("./suffix");
 name.name = require("./name");
 
-},{"./female_first_name":725,"./female_last_name":726,"./female_middle_name":727,"./male_first_name":729,"./male_last_name":730,"./male_middle_name":731,"./name":732,"./prefix":733,"./suffix":734}],729:[function(require,module,exports){
+},{"./female_first_name":704,"./female_last_name":705,"./female_middle_name":706,"./male_first_name":708,"./male_last_name":709,"./male_middle_name":710,"./name":711,"./prefix":712,"./suffix":713}],708:[function(require,module,exports){
 module["exports"] = [
   "Александр",
   "Алексей",
@@ -39092,7 +36749,7 @@ module["exports"] = [
   "Ярослав"
 ];
 
-},{}],730:[function(require,module,exports){
+},{}],709:[function(require,module,exports){
 module["exports"] = [
   "Смирнов",
   "Иванов",
@@ -39346,7 +37003,7 @@ module["exports"] = [
   "Туров"
 ];
 
-},{}],731:[function(require,module,exports){
+},{}],710:[function(require,module,exports){
 module["exports"] = [
   "Александрович",
   "Алексеевич",
@@ -39402,7 +37059,7 @@ module["exports"] = [
   "Ярославович"
 ];
 
-},{}],732:[function(require,module,exports){
+},{}],711:[function(require,module,exports){
 module["exports"] = [
   "#{male_first_name} #{male_last_name}",
   "#{male_last_name} #{male_first_name}",
@@ -39414,27 +37071,27 @@ module["exports"] = [
   "#{female_last_name} #{female_first_name} #{female_middle_name}"
 ];
 
-},{}],733:[function(require,module,exports){
-arguments[4][507][0].apply(exports,arguments)
-},{"dup":507}],734:[function(require,module,exports){
-arguments[4][507][0].apply(exports,arguments)
-},{"dup":507}],735:[function(require,module,exports){
+},{}],712:[function(require,module,exports){
+arguments[4][486][0].apply(exports,arguments)
+},{"dup":486}],713:[function(require,module,exports){
+arguments[4][486][0].apply(exports,arguments)
+},{"dup":486}],714:[function(require,module,exports){
 module["exports"] = [
   "(9##)###-##-##"
 ];
 
-},{}],736:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":735,"dup":76}],737:[function(require,module,exports){
+},{}],715:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":714,"dup":55}],716:[function(require,module,exports){
 module["exports"] = [
   "#",
   "##",
   "###"
 ];
 
-},{}],738:[function(require,module,exports){
-arguments[4][78][0].apply(exports,arguments)
-},{"dup":78}],739:[function(require,module,exports){
+},{}],717:[function(require,module,exports){
+arguments[4][57][0].apply(exports,arguments)
+},{"dup":57}],718:[function(require,module,exports){
 module["exports"] = [
   "Bánovce nad Bebravou",
   "Banská Bystrica",
@@ -39517,11 +37174,11 @@ module["exports"] = [
   "Zvolen"
 ];
 
-},{}],740:[function(require,module,exports){
-arguments[4][122][0].apply(exports,arguments)
-},{"dup":122}],741:[function(require,module,exports){
-arguments[4][123][0].apply(exports,arguments)
-},{"dup":123}],742:[function(require,module,exports){
+},{}],719:[function(require,module,exports){
+arguments[4][101][0].apply(exports,arguments)
+},{"dup":101}],720:[function(require,module,exports){
+arguments[4][102][0].apply(exports,arguments)
+},{"dup":102}],721:[function(require,module,exports){
 module["exports"] = [
   "Afganistan",
   "Afgánsky islamský štát",
@@ -39907,12 +37564,12 @@ module["exports"] = [
   "Zimbabwianska republika"
 ];
 
-},{}],743:[function(require,module,exports){
+},{}],722:[function(require,module,exports){
 module["exports"] = [
   "Slovensko"
 ];
 
-},{}],744:[function(require,module,exports){
+},{}],723:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -39931,20 +37588,20 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":737,"./city":738,"./city_name":739,"./city_prefix":740,"./city_suffix":741,"./country":742,"./default_country":743,"./postcode":745,"./secondary_address":746,"./state":747,"./state_abbr":748,"./street":749,"./street_address":750,"./street_name":751,"./time_zone":752}],745:[function(require,module,exports){
+},{"./building_number":716,"./city":717,"./city_name":718,"./city_prefix":719,"./city_suffix":720,"./country":721,"./default_country":722,"./postcode":724,"./secondary_address":725,"./state":726,"./state_abbr":727,"./street":728,"./street_address":729,"./street_name":730,"./time_zone":731}],724:[function(require,module,exports){
 module["exports"] = [
   "#####",
   "### ##",
   "## ###"
 ];
 
-},{}],746:[function(require,module,exports){
-arguments[4][131][0].apply(exports,arguments)
-},{"dup":131}],747:[function(require,module,exports){
-arguments[4][507][0].apply(exports,arguments)
-},{"dup":507}],748:[function(require,module,exports){
-arguments[4][507][0].apply(exports,arguments)
-},{"dup":507}],749:[function(require,module,exports){
+},{}],725:[function(require,module,exports){
+arguments[4][110][0].apply(exports,arguments)
+},{"dup":110}],726:[function(require,module,exports){
+arguments[4][486][0].apply(exports,arguments)
+},{"dup":486}],727:[function(require,module,exports){
+arguments[4][486][0].apply(exports,arguments)
+},{"dup":486}],728:[function(require,module,exports){
 module["exports"] = [
   "Adámiho",
   "Ahoj",
@@ -41108,18 +38765,18 @@ module["exports"] = [
   "Župné námestie"
 ];
 
-},{}],750:[function(require,module,exports){
-arguments[4][54][0].apply(exports,arguments)
-},{"dup":54}],751:[function(require,module,exports){
+},{}],729:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"dup":33}],730:[function(require,module,exports){
 module["exports"] = [
   "#{street}"
 ];
 
-},{}],752:[function(require,module,exports){
-arguments[4][137][0].apply(exports,arguments)
-},{"dup":137}],753:[function(require,module,exports){
-arguments[4][152][0].apply(exports,arguments)
-},{"dup":152}],754:[function(require,module,exports){
+},{}],731:[function(require,module,exports){
+arguments[4][116][0].apply(exports,arguments)
+},{"dup":116}],732:[function(require,module,exports){
+arguments[4][131][0].apply(exports,arguments)
+},{"dup":131}],733:[function(require,module,exports){
 module["exports"] = [
   "clicks-and-mortar",
   "value-added",
@@ -41232,11 +38889,11 @@ module["exports"] = [
   "methodologies"
 ];
 
-},{}],755:[function(require,module,exports){
-arguments[4][155][0].apply(exports,arguments)
-},{"dup":155}],756:[function(require,module,exports){
-arguments[4][156][0].apply(exports,arguments)
-},{"dup":156}],757:[function(require,module,exports){
+},{}],734:[function(require,module,exports){
+arguments[4][134][0].apply(exports,arguments)
+},{"dup":134}],735:[function(require,module,exports){
+arguments[4][135][0].apply(exports,arguments)
+},{"dup":135}],736:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.suffix = require("./suffix");
@@ -41247,23 +38904,23 @@ company.bs_verb = require("./bs_verb");
 company.bs_noun = require("./bs_noun");
 company.name = require("./name");
 
-},{"./adjective":753,"./bs_noun":754,"./bs_verb":755,"./descriptor":756,"./name":758,"./noun":759,"./suffix":760}],758:[function(require,module,exports){
+},{"./adjective":732,"./bs_noun":733,"./bs_verb":734,"./descriptor":735,"./name":737,"./noun":738,"./suffix":739}],737:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name} #{suffix}",
   "#{Name.man_last_name} a #{Name.man_last_name} #{suffix}"
 ];
 
-},{}],759:[function(require,module,exports){
-arguments[4][159][0].apply(exports,arguments)
-},{"dup":159}],760:[function(require,module,exports){
+},{}],738:[function(require,module,exports){
+arguments[4][138][0].apply(exports,arguments)
+},{"dup":138}],739:[function(require,module,exports){
 module["exports"] = [
   "s.r.o.",
   "a.s.",
   "v.o.s."
 ];
 
-},{}],761:[function(require,module,exports){
+},{}],740:[function(require,module,exports){
 var sk = {};
 module['exports'] = sk;
 sk.title = "Slovakian";
@@ -41274,7 +38931,7 @@ sk.lorem = require("./lorem");
 sk.name = require("./name");
 sk.phone_number = require("./phone_number");
 
-},{"./address":744,"./company":757,"./internet":764,"./lorem":765,"./name":768,"./phone_number":778}],762:[function(require,module,exports){
+},{"./address":723,"./company":736,"./internet":743,"./lorem":744,"./name":747,"./phone_number":757}],741:[function(require,module,exports){
 module["exports"] = [
   "sk",
   "com",
@@ -41283,22 +38940,22 @@ module["exports"] = [
   "org"
 ];
 
-},{}],763:[function(require,module,exports){
+},{}],742:[function(require,module,exports){
 module["exports"] = [
   "gmail.com",
   "zoznam.sk",
   "azet.sk"
 ];
 
-},{}],764:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":762,"./free_email":763,"dup":66}],765:[function(require,module,exports){
-arguments[4][190][0].apply(exports,arguments)
-},{"./supplemental":766,"./words":767,"dup":190}],766:[function(require,module,exports){
-arguments[4][191][0].apply(exports,arguments)
-},{"dup":191}],767:[function(require,module,exports){
-arguments[4][68][0].apply(exports,arguments)
-},{"dup":68}],768:[function(require,module,exports){
+},{}],743:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":741,"./free_email":742,"dup":45}],744:[function(require,module,exports){
+arguments[4][169][0].apply(exports,arguments)
+},{"./supplemental":745,"./words":746,"dup":169}],745:[function(require,module,exports){
+arguments[4][170][0].apply(exports,arguments)
+},{"dup":170}],746:[function(require,module,exports){
+arguments[4][47][0].apply(exports,arguments)
+},{"dup":47}],747:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.man_first_name = require("./man_first_name");
@@ -41310,7 +38967,7 @@ name.suffix = require("./suffix");
 name.title = require("./title");
 name.name = require("./name");
 
-},{"./man_first_name":769,"./man_last_name":770,"./name":771,"./prefix":772,"./suffix":773,"./title":774,"./woman_first_name":775,"./woman_last_name":776}],769:[function(require,module,exports){
+},{"./man_first_name":748,"./man_last_name":749,"./name":750,"./prefix":751,"./suffix":752,"./title":753,"./woman_first_name":754,"./woman_last_name":755}],748:[function(require,module,exports){
 module["exports"] = [
   "Drahoslav",
   "Severín",
@@ -41506,7 +39163,7 @@ module["exports"] = [
   "Silvester"
 ];
 
-},{}],770:[function(require,module,exports){
+},{}],749:[function(require,module,exports){
 module["exports"] = [
   "Antal",
   "Babka",
@@ -41767,7 +39424,7 @@ module["exports"] = [
   "Šťastný"
 ];
 
-},{}],771:[function(require,module,exports){
+},{}],750:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{man_first_name} #{man_last_name}",
   "#{prefix} #{woman_first_name} #{woman_last_name}",
@@ -41781,7 +39438,7 @@ module["exports"] = [
   "#{woman_first_name} #{woman_last_name}"
 ];
 
-},{}],772:[function(require,module,exports){
+},{}],751:[function(require,module,exports){
 module["exports"] = [
   "Ing.",
   "Mgr.",
@@ -41789,14 +39446,14 @@ module["exports"] = [
   "MUDr."
 ];
 
-},{}],773:[function(require,module,exports){
+},{}],752:[function(require,module,exports){
 module["exports"] = [
   "Phd."
 ];
 
-},{}],774:[function(require,module,exports){
-arguments[4][199][0].apply(exports,arguments)
-},{"dup":199}],775:[function(require,module,exports){
+},{}],753:[function(require,module,exports){
+arguments[4][178][0].apply(exports,arguments)
+},{"dup":178}],754:[function(require,module,exports){
 module["exports"] = [
   "Alexandra",
   "Karina",
@@ -42000,7 +39657,7 @@ module["exports"] = [
   "Milada"
 ];
 
-},{}],776:[function(require,module,exports){
+},{}],755:[function(require,module,exports){
 module["exports"] = [
   "Antalová",
   "Babková",
@@ -42255,7 +39912,7 @@ module["exports"] = [
   "Šťastná"
 ];
 
-},{}],777:[function(require,module,exports){
+},{}],756:[function(require,module,exports){
 module["exports"] = [
   "09## ### ###",
   "0## #### ####",
@@ -42263,16 +39920,16 @@ module["exports"] = [
   "+421 ### ### ###"
 ];
 
-},{}],778:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":777,"dup":76}],779:[function(require,module,exports){
-arguments[4][443][0].apply(exports,arguments)
-},{"dup":443}],780:[function(require,module,exports){
+},{}],757:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":756,"dup":55}],758:[function(require,module,exports){
+arguments[4][422][0].apply(exports,arguments)
+},{"dup":422}],759:[function(require,module,exports){
 module["exports"] = [
   "#{city_prefix}#{city_suffix}"
 ];
 
-},{}],781:[function(require,module,exports){
+},{}],760:[function(require,module,exports){
 module["exports"] = [
   "Söder",
   "Norr",
@@ -42301,7 +39958,7 @@ module["exports"] = [
   "Ny"
 ];
 
-},{}],782:[function(require,module,exports){
+},{}],761:[function(require,module,exports){
 module["exports"] = [
   "stad",
   "land",
@@ -42324,13 +39981,13 @@ module["exports"] = [
   "vik"
 ];
 
-},{}],783:[function(require,module,exports){
+},{}],762:[function(require,module,exports){
 module["exports"] = [
   "s Väg",
   "s Gata"
 ];
 
-},{}],784:[function(require,module,exports){
+},{}],763:[function(require,module,exports){
 module["exports"] = [
   "Ryssland",
   "Kanada",
@@ -42539,12 +40196,12 @@ module["exports"] = [
   "Vatikanstaten"
 ];
 
-},{}],785:[function(require,module,exports){
+},{}],764:[function(require,module,exports){
 module["exports"] = [
   "Sverige"
 ];
 
-},{}],786:[function(require,module,exports){
+},{}],765:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -42563,15 +40220,15 @@ address.secondary_address = require("./secondary_address");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":779,"./city":780,"./city_prefix":781,"./city_suffix":782,"./common_street_suffix":783,"./country":784,"./default_country":785,"./postcode":787,"./secondary_address":788,"./state":789,"./street_address":790,"./street_name":791,"./street_prefix":792,"./street_root":793,"./street_suffix":794}],787:[function(require,module,exports){
-arguments[4][311][0].apply(exports,arguments)
-},{"dup":311}],788:[function(require,module,exports){
+},{"./building_number":758,"./city":759,"./city_prefix":760,"./city_suffix":761,"./common_street_suffix":762,"./country":763,"./default_country":764,"./postcode":766,"./secondary_address":767,"./state":768,"./street_address":769,"./street_name":770,"./street_prefix":771,"./street_root":772,"./street_suffix":773}],766:[function(require,module,exports){
+arguments[4][290][0].apply(exports,arguments)
+},{"dup":290}],767:[function(require,module,exports){
 module["exports"] = [
   "Lgh. ###",
   "Hus ###"
 ];
 
-},{}],789:[function(require,module,exports){
+},{}],768:[function(require,module,exports){
 module["exports"] = [
   "Blekinge",
   "Dalarna",
@@ -42598,11 +40255,11 @@ module["exports"] = [
   "Östergötland"
 ];
 
-},{}],790:[function(require,module,exports){
-arguments[4][54][0].apply(exports,arguments)
-},{"dup":54}],791:[function(require,module,exports){
-arguments[4][564][0].apply(exports,arguments)
-},{"dup":564}],792:[function(require,module,exports){
+},{}],769:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"dup":33}],770:[function(require,module,exports){
+arguments[4][543][0].apply(exports,arguments)
+},{"dup":543}],771:[function(require,module,exports){
 module["exports"] = [
   "Västra",
   "Östra",
@@ -42612,7 +40269,7 @@ module["exports"] = [
   "Undre"
 ];
 
-},{}],793:[function(require,module,exports){
+},{}],772:[function(require,module,exports){
 module["exports"] = [
   "Björk",
   "Järnvägs",
@@ -42644,7 +40301,7 @@ module["exports"] = [
   "Asp"
 ];
 
-},{}],794:[function(require,module,exports){
+},{}],773:[function(require,module,exports){
 module["exports"] = [
   "vägen",
   "gatan",
@@ -42653,25 +40310,25 @@ module["exports"] = [
   "allén"
 ];
 
-},{}],795:[function(require,module,exports){
+},{}],774:[function(require,module,exports){
 module["exports"] = [
   56,
   62,
   59
 ];
 
-},{}],796:[function(require,module,exports){
+},{}],775:[function(require,module,exports){
 module["exports"] = [
   "#{common_cell_prefix}-###-####"
 ];
 
-},{}],797:[function(require,module,exports){
+},{}],776:[function(require,module,exports){
 var cell_phone = {};
 module['exports'] = cell_phone;
 cell_phone.common_cell_prefix = require("./common_cell_prefix");
 cell_phone.formats = require("./formats");
 
-},{"./common_cell_prefix":795,"./formats":796}],798:[function(require,module,exports){
+},{"./common_cell_prefix":774,"./formats":775}],777:[function(require,module,exports){
 module["exports"] = [
   "vit",
   "silver",
@@ -42690,7 +40347,7 @@ module["exports"] = [
   "korall"
 ];
 
-},{}],799:[function(require,module,exports){
+},{}],778:[function(require,module,exports){
 module["exports"] = [
   "Böcker",
   "Filmer",
@@ -42711,9 +40368,9 @@ module["exports"] = [
   "Sport"
 ];
 
-},{}],800:[function(require,module,exports){
-arguments[4][150][0].apply(exports,arguments)
-},{"./color":798,"./department":799,"./product_name":801,"dup":150}],801:[function(require,module,exports){
+},{}],779:[function(require,module,exports){
+arguments[4][129][0].apply(exports,arguments)
+},{"./color":777,"./department":778,"./product_name":780,"dup":129}],780:[function(require,module,exports){
 module["exports"] = {
   "adjective": [
     "Liten",
@@ -42751,16 +40408,16 @@ module["exports"] = {
   ]
 };
 
-},{}],802:[function(require,module,exports){
-arguments[4][112][0].apply(exports,arguments)
-},{"./name":803,"./suffix":804,"dup":112}],803:[function(require,module,exports){
+},{}],781:[function(require,module,exports){
+arguments[4][91][0].apply(exports,arguments)
+},{"./name":782,"./suffix":783,"dup":91}],782:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name} #{suffix}",
   "#{Name.last_name}-#{Name.last_name}",
   "#{Name.last_name}, #{Name.last_name} #{suffix}"
 ];
 
-},{}],804:[function(require,module,exports){
+},{}],783:[function(require,module,exports){
 module["exports"] = [
   "Gruppen",
   "AB",
@@ -42771,7 +40428,7 @@ module["exports"] = [
   "Aktiebolag"
 ];
 
-},{}],805:[function(require,module,exports){
+},{}],784:[function(require,module,exports){
 var sv = {};
 module['exports'] = sv;
 sv.title = "Swedish";
@@ -42784,7 +40441,7 @@ sv.cell_phone = require("./cell_phone");
 sv.commerce = require("./commerce");
 sv.team = require("./team");
 
-},{"./address":786,"./cell_phone":797,"./commerce":800,"./company":802,"./internet":807,"./name":810,"./phone_number":816,"./team":817}],806:[function(require,module,exports){
+},{"./address":765,"./cell_phone":776,"./commerce":779,"./company":781,"./internet":786,"./name":789,"./phone_number":795,"./team":796}],785:[function(require,module,exports){
 module["exports"] = [
   "se",
   "nu",
@@ -42793,9 +40450,9 @@ module["exports"] = [
   "org"
 ];
 
-},{}],807:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":806,"dup":117}],808:[function(require,module,exports){
+},{}],786:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":785,"dup":96}],787:[function(require,module,exports){
 module["exports"] = [
   "Erik",
   "Lars",
@@ -42809,7 +40466,7 @@ module["exports"] = [
   "Hans"
 ];
 
-},{}],809:[function(require,module,exports){
+},{}],788:[function(require,module,exports){
 module["exports"] = [
   "Maria",
   "Anna",
@@ -42823,7 +40480,7 @@ module["exports"] = [
   "Marie"
 ];
 
-},{}],810:[function(require,module,exports){
+},{}],789:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name_women = require("./first_name_women");
@@ -42833,7 +40490,7 @@ name.prefix = require("./prefix");
 name.title = require("./title");
 name.name = require("./name");
 
-},{"./first_name_men":808,"./first_name_women":809,"./last_name":811,"./name":812,"./prefix":813,"./title":814}],811:[function(require,module,exports){
+},{"./first_name_men":787,"./first_name_women":788,"./last_name":790,"./name":791,"./prefix":792,"./title":793}],790:[function(require,module,exports){
 module["exports"] = [
   "Johansson",
   "Andersson",
@@ -42847,7 +40504,7 @@ module["exports"] = [
   "Gustafsson"
 ];
 
-},{}],812:[function(require,module,exports){
+},{}],791:[function(require,module,exports){
 module["exports"] = [
   "#{first_name_women} #{last_name}",
   "#{first_name_men} #{last_name}",
@@ -42859,35 +40516,35 @@ module["exports"] = [
   "#{prefix} #{first_name_women} #{last_name}"
 ];
 
-},{}],813:[function(require,module,exports){
+},{}],792:[function(require,module,exports){
 module["exports"] = [
   "Dr.",
   "Prof.",
   "PhD."
 ];
 
-},{}],814:[function(require,module,exports){
-arguments[4][199][0].apply(exports,arguments)
-},{"dup":199}],815:[function(require,module,exports){
+},{}],793:[function(require,module,exports){
+arguments[4][178][0].apply(exports,arguments)
+},{"dup":178}],794:[function(require,module,exports){
 module["exports"] = [
   "####-#####",
   "####-######"
 ];
 
-},{}],816:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":815,"dup":76}],817:[function(require,module,exports){
+},{}],795:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":794,"dup":55}],796:[function(require,module,exports){
 var team = {};
 module['exports'] = team;
 team.suffix = require("./suffix");
 team.name = require("./name");
 
-},{"./name":818,"./suffix":819}],818:[function(require,module,exports){
+},{"./name":797,"./suffix":798}],797:[function(require,module,exports){
 module["exports"] = [
   "#{Address.city} #{suffix}"
 ];
 
-},{}],819:[function(require,module,exports){
+},{}],798:[function(require,module,exports){
 module["exports"] = [
   "IF",
   "FF",
@@ -42904,9 +40561,9 @@ module["exports"] = [
   "IK"
 ];
 
-},{}],820:[function(require,module,exports){
-arguments[4][43][0].apply(exports,arguments)
-},{"dup":43}],821:[function(require,module,exports){
+},{}],799:[function(require,module,exports){
+arguments[4][22][0].apply(exports,arguments)
+},{"dup":22}],800:[function(require,module,exports){
 module["exports"] = [
   "Adana",
   "Adıyaman",
@@ -42991,7 +40648,7 @@ module["exports"] = [
   "Düzce"
 ];
 
-},{}],822:[function(require,module,exports){
+},{}],801:[function(require,module,exports){
 module["exports"] = [
   "Afganistan",
   "Almanya",
@@ -43231,12 +40888,12 @@ module["exports"] = [
   "Zimbabve"
 ];
 
-},{}],823:[function(require,module,exports){
+},{}],802:[function(require,module,exports){
 module["exports"] = [
   "Türkiye"
 ];
 
-},{}],824:[function(require,module,exports){
+},{}],803:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city = require("./city");
@@ -43248,13 +40905,13 @@ address.building_number = require("./building_number");
 address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 
-},{"./building_number":820,"./city":821,"./country":822,"./default_country":823,"./postcode":825,"./street_address":826,"./street_name":827,"./street_root":828}],825:[function(require,module,exports){
-arguments[4][311][0].apply(exports,arguments)
-},{"dup":311}],826:[function(require,module,exports){
-arguments[4][54][0].apply(exports,arguments)
-},{"dup":54}],827:[function(require,module,exports){
-arguments[4][55][0].apply(exports,arguments)
-},{"dup":55}],828:[function(require,module,exports){
+},{"./building_number":799,"./city":800,"./country":801,"./default_country":802,"./postcode":804,"./street_address":805,"./street_name":806,"./street_root":807}],804:[function(require,module,exports){
+arguments[4][290][0].apply(exports,arguments)
+},{"dup":290}],805:[function(require,module,exports){
+arguments[4][33][0].apply(exports,arguments)
+},{"dup":33}],806:[function(require,module,exports){
+arguments[4][34][0].apply(exports,arguments)
+},{"dup":34}],807:[function(require,module,exports){
 module["exports"] = [
   "Atatürk Bulvarı",
   "Alparslan Türkeş Bulvarı",
@@ -43299,7 +40956,7 @@ module["exports"] = [
   "Bandak Sokak"
 ];
 
-},{}],829:[function(require,module,exports){
+},{}],808:[function(require,module,exports){
 module["exports"] = [
   "+90-53#-###-##-##",
   "+90-54#-###-##-##",
@@ -43307,9 +40964,9 @@ module["exports"] = [
   "+90-50#-###-##-##"
 ];
 
-},{}],830:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":829,"dup":58}],831:[function(require,module,exports){
+},{}],809:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":808,"dup":37}],810:[function(require,module,exports){
 var tr = {};
 module['exports'] = tr;
 tr.title = "Turkish";
@@ -43320,7 +40977,7 @@ tr.phone_number = require("./phone_number");
 tr.cell_phone = require("./cell_phone");
 tr.name = require("./name");
 
-},{"./address":824,"./cell_phone":830,"./internet":833,"./lorem":834,"./name":837,"./phone_number":843}],832:[function(require,module,exports){
+},{"./address":803,"./cell_phone":809,"./internet":812,"./lorem":813,"./name":816,"./phone_number":822}],811:[function(require,module,exports){
 module["exports"] = [
   "com.tr",
   "com",
@@ -43330,13 +40987,13 @@ module["exports"] = [
   "gov.tr"
 ];
 
-},{}],833:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":832,"dup":117}],834:[function(require,module,exports){
-arguments[4][67][0].apply(exports,arguments)
-},{"./words":835,"dup":67}],835:[function(require,module,exports){
-arguments[4][68][0].apply(exports,arguments)
-},{"dup":68}],836:[function(require,module,exports){
+},{}],812:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":811,"dup":96}],813:[function(require,module,exports){
+arguments[4][46][0].apply(exports,arguments)
+},{"./words":814,"dup":46}],814:[function(require,module,exports){
+arguments[4][47][0].apply(exports,arguments)
+},{"dup":47}],815:[function(require,module,exports){
 module["exports"] = [
   "Aba",
   "Abak",
@@ -44071,7 +41728,7 @@ module["exports"] = [
   "Kızılalma"
 ];
 
-},{}],837:[function(require,module,exports){
+},{}],816:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
@@ -44079,7 +41736,7 @@ name.last_name = require("./last_name");
 name.prefix = require("./prefix");
 name.name = require("./name");
 
-},{"./first_name":836,"./last_name":838,"./name":839,"./prefix":840}],838:[function(require,module,exports){
+},{"./first_name":815,"./last_name":817,"./name":818,"./prefix":819}],817:[function(require,module,exports){
 module["exports"] = [
   "Abacı",
   "Abadan",
@@ -44281,9 +41938,9 @@ module["exports"] = [
   "Öztuna"
 ];
 
-},{}],839:[function(require,module,exports){
-arguments[4][470][0].apply(exports,arguments)
-},{"dup":470}],840:[function(require,module,exports){
+},{}],818:[function(require,module,exports){
+arguments[4][449][0].apply(exports,arguments)
+},{"dup":449}],819:[function(require,module,exports){
 module["exports"] = [
   "Bay",
   "Bayan",
@@ -44291,7 +41948,7 @@ module["exports"] = [
   "Prof. Dr."
 ];
 
-},{}],841:[function(require,module,exports){
+},{}],820:[function(require,module,exports){
 module["exports"] = [
   "392",
   "510",
@@ -44392,27 +42049,27 @@ module["exports"] = [
   "372"
 ];
 
-},{}],842:[function(require,module,exports){
+},{}],821:[function(require,module,exports){
 module["exports"] = [
   "+90-###-###-##-##",
   "+90-###-###-#-###"
 ];
 
-},{}],843:[function(require,module,exports){
+},{}],822:[function(require,module,exports){
 var phone_number = {};
 module['exports'] = phone_number;
 phone_number.area_code = require("./area_code");
 phone_number.formats = require("./formats");
 
-},{"./area_code":841,"./formats":842}],844:[function(require,module,exports){
-arguments[4][737][0].apply(exports,arguments)
-},{"dup":737}],845:[function(require,module,exports){
+},{"./area_code":820,"./formats":821}],823:[function(require,module,exports){
+arguments[4][716][0].apply(exports,arguments)
+},{"dup":716}],824:[function(require,module,exports){
 module["exports"] = [
   "#{city_name}",
   "#{city_prefix} #{Name.male_first_name}"
 ];
 
-},{}],846:[function(require,module,exports){
+},{}],825:[function(require,module,exports){
 module["exports"] = [
   "Алчевськ",
   "Артемівськ",
@@ -44473,7 +42130,7 @@ module["exports"] = [
   "Ялта"
 ];
 
-},{}],847:[function(require,module,exports){
+},{}],826:[function(require,module,exports){
 module["exports"] = [
   "Південний",
   "Північний",
@@ -44481,12 +42138,12 @@ module["exports"] = [
   "Західний"
 ];
 
-},{}],848:[function(require,module,exports){
+},{}],827:[function(require,module,exports){
 module["exports"] = [
   "град"
 ];
 
-},{}],849:[function(require,module,exports){
+},{}],828:[function(require,module,exports){
 module["exports"] = [
   "Австралія",
   "Австрія",
@@ -44683,12 +42340,12 @@ module["exports"] = [
   "Японія"
 ];
 
-},{}],850:[function(require,module,exports){
+},{}],829:[function(require,module,exports){
 module["exports"] = [
   "Україна"
 ];
 
-},{}],851:[function(require,module,exports){
+},{}],830:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.country = require("./country");
@@ -44707,11 +42364,11 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":844,"./city":845,"./city_name":846,"./city_prefix":847,"./city_suffix":848,"./country":849,"./default_country":850,"./postcode":852,"./secondary_address":853,"./state":854,"./street_address":855,"./street_name":856,"./street_prefix":857,"./street_suffix":858,"./street_title":859}],852:[function(require,module,exports){
-arguments[4][311][0].apply(exports,arguments)
-},{"dup":311}],853:[function(require,module,exports){
-arguments[4][704][0].apply(exports,arguments)
-},{"dup":704}],854:[function(require,module,exports){
+},{"./building_number":823,"./city":824,"./city_name":825,"./city_prefix":826,"./city_suffix":827,"./country":828,"./default_country":829,"./postcode":831,"./secondary_address":832,"./state":833,"./street_address":834,"./street_name":835,"./street_prefix":836,"./street_suffix":837,"./street_title":838}],831:[function(require,module,exports){
+arguments[4][290][0].apply(exports,arguments)
+},{"dup":290}],832:[function(require,module,exports){
+arguments[4][683][0].apply(exports,arguments)
+},{"dup":683}],833:[function(require,module,exports){
 module["exports"] = [
   "АР Крим",
   "Вінницька область",
@@ -44742,15 +42399,15 @@ module["exports"] = [
   "Севастополь"
 ];
 
-},{}],855:[function(require,module,exports){
-arguments[4][706][0].apply(exports,arguments)
-},{"dup":706}],856:[function(require,module,exports){
+},{}],834:[function(require,module,exports){
+arguments[4][685][0].apply(exports,arguments)
+},{"dup":685}],835:[function(require,module,exports){
 module["exports"] = [
   "#{street_prefix} #{Address.street_title}",
   "#{Address.street_title} #{street_suffix}"
 ];
 
-},{}],857:[function(require,module,exports){
+},{}],836:[function(require,module,exports){
 module["exports"] = [
   "вул.",
   "вулиця",
@@ -44762,12 +42419,12 @@ module["exports"] = [
   "провулок"
 ];
 
-},{}],858:[function(require,module,exports){
+},{}],837:[function(require,module,exports){
 module["exports"] = [
   "майдан"
 ];
 
-},{}],859:[function(require,module,exports){
+},{}],838:[function(require,module,exports){
 module["exports"] = [
   "Зелена",
   "Молодіжна",
@@ -44784,11 +42441,11 @@ module["exports"] = [
   "Коліївщини"
 ];
 
-},{}],860:[function(require,module,exports){
-arguments[4][459][0].apply(exports,arguments)
-},{"./name":861,"./prefix":862,"./suffix":863,"dup":459}],861:[function(require,module,exports){
-arguments[4][715][0].apply(exports,arguments)
-},{"dup":715}],862:[function(require,module,exports){
+},{}],839:[function(require,module,exports){
+arguments[4][438][0].apply(exports,arguments)
+},{"./name":840,"./prefix":841,"./suffix":842,"dup":438}],840:[function(require,module,exports){
+arguments[4][694][0].apply(exports,arguments)
+},{"dup":694}],841:[function(require,module,exports){
 module["exports"] = [
   "ТОВ",
   "ПАТ",
@@ -44800,7 +42457,7 @@ module["exports"] = [
   "ФОП"
 ];
 
-},{}],863:[function(require,module,exports){
+},{}],842:[function(require,module,exports){
 module["exports"] = [
   "Постач",
   "Торг",
@@ -44809,7 +42466,7 @@ module["exports"] = [
   "Збут"
 ];
 
-},{}],864:[function(require,module,exports){
+},{}],843:[function(require,module,exports){
 var uk = {};
 module['exports'] = uk;
 uk.title = "Ukrainian";
@@ -44819,7 +42476,7 @@ uk.internet = require("./internet");
 uk.name = require("./name");
 uk.phone_number = require("./phone_number");
 
-},{"./address":851,"./company":860,"./internet":867,"./name":871,"./phone_number":880}],865:[function(require,module,exports){
+},{"./address":830,"./company":839,"./internet":846,"./name":850,"./phone_number":859}],844:[function(require,module,exports){
 module["exports"] = [
   "cherkassy.ua",
   "cherkasy.ua",
@@ -44883,7 +42540,7 @@ module["exports"] = [
   "укр"
 ];
 
-},{}],866:[function(require,module,exports){
+},{}],845:[function(require,module,exports){
 module["exports"] = [
   "ukr.net",
   "ex.ua",
@@ -44894,9 +42551,9 @@ module["exports"] = [
   "gmail.com"
 ];
 
-},{}],867:[function(require,module,exports){
-arguments[4][66][0].apply(exports,arguments)
-},{"./domain_suffix":865,"./free_email":866,"dup":66}],868:[function(require,module,exports){
+},{}],846:[function(require,module,exports){
+arguments[4][45][0].apply(exports,arguments)
+},{"./domain_suffix":844,"./free_email":845,"dup":45}],847:[function(require,module,exports){
 module["exports"] = [
   "Аврелія",
   "Аврора",
@@ -45093,7 +42750,7 @@ module["exports"] = [
   "Ярослава"
 ];
 
-},{}],869:[function(require,module,exports){
+},{}],848:[function(require,module,exports){
 module["exports"] = [
   "Андрухович",
   "Бабух",
@@ -45327,7 +42984,7 @@ module["exports"] = [
   "Ящук"
 ];
 
-},{}],870:[function(require,module,exports){
+},{}],849:[function(require,module,exports){
 module["exports"] = [
   "Адамівна",
   "Азарівна",
@@ -45447,7 +43104,7 @@ module["exports"] = [
   "Ярославівна"
 ];
 
-},{}],871:[function(require,module,exports){
+},{}],850:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.male_first_name = require("./male_first_name");
@@ -45461,7 +43118,7 @@ name.suffix = require("./suffix");
 name.title = require("./title");
 name.name = require("./name");
 
-},{"./female_first_name":868,"./female_last_name":869,"./female_middle_name":870,"./male_first_name":872,"./male_last_name":873,"./male_middle_name":874,"./name":875,"./prefix":876,"./suffix":877,"./title":878}],872:[function(require,module,exports){
+},{"./female_first_name":847,"./female_last_name":848,"./female_middle_name":849,"./male_first_name":851,"./male_last_name":852,"./male_middle_name":853,"./name":854,"./prefix":855,"./suffix":856,"./title":857}],851:[function(require,module,exports){
 module["exports"] = [
   "Августин",
   "Аврелій",
@@ -45660,7 +43317,7 @@ module["exports"] = [
   "Ярослав"
 ];
 
-},{}],873:[function(require,module,exports){
+},{}],852:[function(require,module,exports){
 module["exports"] = [
   "Андрухович",
   "Бабух",
@@ -45903,7 +43560,7 @@ module["exports"] = [
   "Ящук"
 ];
 
-},{}],874:[function(require,module,exports){
+},{}],853:[function(require,module,exports){
 module["exports"] = [
   "Адамович",
   "Азарович",
@@ -46023,15 +43680,15 @@ module["exports"] = [
   "Ярославович"
 ];
 
-},{}],875:[function(require,module,exports){
-arguments[4][732][0].apply(exports,arguments)
-},{"dup":732}],876:[function(require,module,exports){
+},{}],854:[function(require,module,exports){
+arguments[4][711][0].apply(exports,arguments)
+},{"dup":711}],855:[function(require,module,exports){
 module["exports"] = [
   "Пан",
   "Пані"
 ];
 
-},{}],877:[function(require,module,exports){
+},{}],856:[function(require,module,exports){
 module["exports"] = [
   "проф.",
   "доц.",
@@ -46053,7 +43710,7 @@ module["exports"] = [
   "канд. психол. наук"
 ];
 
-},{}],878:[function(require,module,exports){
+},{}],857:[function(require,module,exports){
 module["exports"] = {
   "descriptor": [
     "Головний",
@@ -46095,7 +43752,7 @@ module["exports"] = {
   ]
 };
 
-},{}],879:[function(require,module,exports){
+},{}],858:[function(require,module,exports){
 module["exports"] = [
   "(044) ###-##-##",
   "(050) ###-##-##",
@@ -46113,14 +43770,14 @@ module["exports"] = [
   "(099) ###-##-##"
 ];
 
-},{}],880:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":879,"dup":76}],881:[function(require,module,exports){
+},{}],859:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":858,"dup":55}],860:[function(require,module,exports){
 module["exports"] = [
   "#{city_root}"
 ];
 
-},{}],882:[function(require,module,exports){
+},{}],861:[function(require,module,exports){
 module["exports"] = [
   "Bắc Giang",
   "Bắc Kạn",
@@ -46187,7 +43844,7 @@ module["exports"] = [
   "Vĩnh Long"
 ];
 
-},{}],883:[function(require,module,exports){
+},{}],862:[function(require,module,exports){
 module["exports"] = [
   "Avon",
   "Bedfordshire",
@@ -46262,12 +43919,12 @@ module["exports"] = [
   "Worcestershire"
 ];
 
-},{}],884:[function(require,module,exports){
+},{}],863:[function(require,module,exports){
 module["exports"] = [
   "Việt Nam"
 ];
 
-},{}],885:[function(require,module,exports){
+},{}],864:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_root = require("./city_root");
@@ -46275,22 +43932,22 @@ address.city = require("./city");
 address.county = require("./county");
 address.default_country = require("./default_country");
 
-},{"./city":881,"./city_root":882,"./county":883,"./default_country":884}],886:[function(require,module,exports){
-arguments[4][240][0].apply(exports,arguments)
-},{"dup":240}],887:[function(require,module,exports){
-arguments[4][58][0].apply(exports,arguments)
-},{"./formats":886,"dup":58}],888:[function(require,module,exports){
+},{"./city":860,"./city_root":861,"./county":862,"./default_country":863}],865:[function(require,module,exports){
+arguments[4][219][0].apply(exports,arguments)
+},{"dup":219}],866:[function(require,module,exports){
+arguments[4][37][0].apply(exports,arguments)
+},{"./formats":865,"dup":37}],867:[function(require,module,exports){
 var company = {};
 module['exports'] = company;
 company.prefix = require("./prefix");
 company.name = require("./name");
 
-},{"./name":889,"./prefix":890}],889:[function(require,module,exports){
+},{"./name":868,"./prefix":869}],868:[function(require,module,exports){
 module["exports"] = [
   "#{prefix} #{Name.last_name}"
 ];
 
-},{}],890:[function(require,module,exports){
+},{}],869:[function(require,module,exports){
 module["exports"] = [
   "Công ty",
   "Cty TNHH",
@@ -46300,7 +43957,7 @@ module["exports"] = [
   "Chi nhánh"
 ];
 
-},{}],891:[function(require,module,exports){
+},{}],870:[function(require,module,exports){
 var vi = {};
 module['exports'] = vi;
 vi.title = "Vietnamese";
@@ -46312,7 +43969,7 @@ vi.name = require("./name");
 vi.company = require("./company");
 vi.lorem = require("./lorem");
 
-},{"./address":885,"./cell_phone":887,"./company":888,"./internet":893,"./lorem":894,"./name":897,"./phone_number":901}],892:[function(require,module,exports){
+},{"./address":864,"./cell_phone":866,"./company":867,"./internet":872,"./lorem":873,"./name":876,"./phone_number":880}],871:[function(require,module,exports){
 module["exports"] = [
   "com",
   "net",
@@ -46321,11 +43978,11 @@ module["exports"] = [
   "com.vn"
 ];
 
-},{}],893:[function(require,module,exports){
-arguments[4][117][0].apply(exports,arguments)
-},{"./domain_suffix":892,"dup":117}],894:[function(require,module,exports){
-arguments[4][67][0].apply(exports,arguments)
-},{"./words":895,"dup":67}],895:[function(require,module,exports){
+},{}],872:[function(require,module,exports){
+arguments[4][96][0].apply(exports,arguments)
+},{"./domain_suffix":871,"dup":96}],873:[function(require,module,exports){
+arguments[4][46][0].apply(exports,arguments)
+},{"./words":874,"dup":46}],874:[function(require,module,exports){
 module["exports"] = [
   "đã",
   "đang",
@@ -46432,7 +44089,7 @@ module["exports"] = [
   "hương"
 ];
 
-},{}],896:[function(require,module,exports){
+},{}],875:[function(require,module,exports){
 module["exports"] = [
   "Phạm",
   "Nguyễn",
@@ -46462,14 +44119,14 @@ module["exports"] = [
   "Hà"
 ];
 
-},{}],897:[function(require,module,exports){
+},{}],876:[function(require,module,exports){
 var name = {};
 module['exports'] = name;
 name.first_name = require("./first_name");
 name.last_name = require("./last_name");
 name.name = require("./name");
 
-},{"./first_name":896,"./last_name":898,"./name":899}],898:[function(require,module,exports){
+},{"./first_name":875,"./last_name":877,"./name":878}],877:[function(require,module,exports){
 module["exports"] = [
   "Nam",
   "Trung",
@@ -46546,18 +44203,18 @@ module["exports"] = [
   "Nhàn"
 ];
 
-},{}],899:[function(require,module,exports){
+},{}],878:[function(require,module,exports){
 module["exports"] = [
   "#{first_name} #{last_name}",
   "#{first_name} #{last_name} #{last_name}",
   "#{first_name} #{last_name} #{last_name} #{last_name}"
 ];
 
-},{}],900:[function(require,module,exports){
-arguments[4][245][0].apply(exports,arguments)
-},{"dup":245}],901:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":900,"dup":76}],902:[function(require,module,exports){
+},{}],879:[function(require,module,exports){
+arguments[4][224][0].apply(exports,arguments)
+},{"dup":224}],880:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":879,"dup":55}],881:[function(require,module,exports){
 module["exports"] = [
   "#####",
   "####",
@@ -46566,9 +44223,9 @@ module["exports"] = [
   "#"
 ];
 
-},{}],903:[function(require,module,exports){
-arguments[4][780][0].apply(exports,arguments)
-},{"dup":780}],904:[function(require,module,exports){
+},{}],882:[function(require,module,exports){
+arguments[4][759][0].apply(exports,arguments)
+},{"dup":759}],883:[function(require,module,exports){
 module["exports"] = [
   "长",
   "上",
@@ -46593,7 +44250,7 @@ module["exports"] = [
   "包"
 ];
 
-},{}],905:[function(require,module,exports){
+},{}],884:[function(require,module,exports){
 module["exports"] = [
   "沙市",
   "京市",
@@ -46616,12 +44273,12 @@ module["exports"] = [
   "头市"
 ];
 
-},{}],906:[function(require,module,exports){
+},{}],885:[function(require,module,exports){
 module["exports"] = [
   "中国"
 ];
 
-},{}],907:[function(require,module,exports){
+},{}],886:[function(require,module,exports){
 var address = {};
 module['exports'] = address;
 address.city_prefix = require("./city_prefix");
@@ -46636,9 +44293,9 @@ address.street_name = require("./street_name");
 address.street_address = require("./street_address");
 address.default_country = require("./default_country");
 
-},{"./building_number":902,"./city":903,"./city_prefix":904,"./city_suffix":905,"./default_country":906,"./postcode":908,"./state":909,"./state_abbr":910,"./street_address":911,"./street_name":912,"./street_suffix":913}],908:[function(require,module,exports){
-arguments[4][703][0].apply(exports,arguments)
-},{"dup":703}],909:[function(require,module,exports){
+},{"./building_number":881,"./city":882,"./city_prefix":883,"./city_suffix":884,"./default_country":885,"./postcode":887,"./state":888,"./state_abbr":889,"./street_address":890,"./street_name":891,"./street_suffix":892}],887:[function(require,module,exports){
+arguments[4][682][0].apply(exports,arguments)
+},{"dup":682}],888:[function(require,module,exports){
 module["exports"] = [
   "北京市",
   "上海市",
@@ -46676,7 +44333,7 @@ module["exports"] = [
   "澳门"
 ];
 
-},{}],910:[function(require,module,exports){
+},{}],889:[function(require,module,exports){
 module["exports"] = [
   "京",
   "沪",
@@ -46714,17 +44371,17 @@ module["exports"] = [
   "澳"
 ];
 
-},{}],911:[function(require,module,exports){
+},{}],890:[function(require,module,exports){
 module["exports"] = [
   "#{street_name}#{building_number}号"
 ];
 
-},{}],912:[function(require,module,exports){
+},{}],891:[function(require,module,exports){
 module["exports"] = [
   "#{Name.last_name}#{street_suffix}"
 ];
 
-},{}],913:[function(require,module,exports){
+},{}],892:[function(require,module,exports){
 module["exports"] = [
   "巷",
   "街",
@@ -46736,7 +44393,7 @@ module["exports"] = [
   "栋"
 ];
 
-},{}],914:[function(require,module,exports){
+},{}],893:[function(require,module,exports){
 var zh_CN = {};
 module['exports'] = zh_CN;
 zh_CN.title = "Chinese";
@@ -46744,7 +44401,7 @@ zh_CN.address = require("./address");
 zh_CN.name = require("./name");
 zh_CN.phone_number = require("./phone_number");
 
-},{"./address":907,"./name":916,"./phone_number":920}],915:[function(require,module,exports){
+},{"./address":886,"./name":895,"./phone_number":899}],894:[function(require,module,exports){
 module["exports"] = [
   "王",
   "李",
@@ -46848,9 +44505,9 @@ module["exports"] = [
   "孔"
 ];
 
-},{}],916:[function(require,module,exports){
-arguments[4][897][0].apply(exports,arguments)
-},{"./first_name":915,"./last_name":917,"./name":918,"dup":897}],917:[function(require,module,exports){
+},{}],895:[function(require,module,exports){
+arguments[4][876][0].apply(exports,arguments)
+},{"./first_name":894,"./last_name":896,"./name":897,"dup":876}],896:[function(require,module,exports){
 module["exports"] = [
   "绍齐",
   "博文",
@@ -46988,25 +44645,25 @@ module["exports"] = [
   "彬"
 ];
 
-},{}],918:[function(require,module,exports){
+},{}],897:[function(require,module,exports){
 module["exports"] = [
   "#{first_name}#{last_name}"
 ];
 
-},{}],919:[function(require,module,exports){
+},{}],898:[function(require,module,exports){
 module["exports"] = [
   "###-########",
   "####-########",
   "###########"
 ];
 
-},{}],920:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":919,"dup":76}],921:[function(require,module,exports){
-arguments[4][396][0].apply(exports,arguments)
-},{"dup":396}],922:[function(require,module,exports){
-arguments[4][780][0].apply(exports,arguments)
-},{"dup":780}],923:[function(require,module,exports){
+},{}],899:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":898,"dup":55}],900:[function(require,module,exports){
+arguments[4][375][0].apply(exports,arguments)
+},{"dup":375}],901:[function(require,module,exports){
+arguments[4][759][0].apply(exports,arguments)
+},{"dup":759}],902:[function(require,module,exports){
 module["exports"] = [
   "臺北",
   "新北",
@@ -47030,28 +44687,28 @@ module["exports"] = [
   "連江"
 ];
 
-},{}],924:[function(require,module,exports){
+},{}],903:[function(require,module,exports){
 module["exports"] = [
   "縣",
   "市"
 ];
 
-},{}],925:[function(require,module,exports){
+},{}],904:[function(require,module,exports){
 module["exports"] = [
   "Taiwan (R.O.C.)"
 ];
 
-},{}],926:[function(require,module,exports){
-arguments[4][907][0].apply(exports,arguments)
-},{"./building_number":921,"./city":922,"./city_prefix":923,"./city_suffix":924,"./default_country":925,"./postcode":927,"./state":928,"./state_abbr":929,"./street_address":930,"./street_name":931,"./street_suffix":932,"dup":907}],927:[function(require,module,exports){
-arguments[4][703][0].apply(exports,arguments)
-},{"dup":703}],928:[function(require,module,exports){
+},{}],905:[function(require,module,exports){
+arguments[4][886][0].apply(exports,arguments)
+},{"./building_number":900,"./city":901,"./city_prefix":902,"./city_suffix":903,"./default_country":904,"./postcode":906,"./state":907,"./state_abbr":908,"./street_address":909,"./street_name":910,"./street_suffix":911,"dup":886}],906:[function(require,module,exports){
+arguments[4][682][0].apply(exports,arguments)
+},{"dup":682}],907:[function(require,module,exports){
 module["exports"] = [
   "福建省",
   "台灣省"
 ];
 
-},{}],929:[function(require,module,exports){
+},{}],908:[function(require,module,exports){
 module["exports"] = [
   "北",
   "新北",
@@ -47076,14 +44733,14 @@ module["exports"] = [
   "馬"
 ];
 
-},{}],930:[function(require,module,exports){
+},{}],909:[function(require,module,exports){
 module["exports"] = [
   "#{street_name}#{building_number}號"
 ];
 
-},{}],931:[function(require,module,exports){
-arguments[4][912][0].apply(exports,arguments)
-},{"dup":912}],932:[function(require,module,exports){
+},{}],910:[function(require,module,exports){
+arguments[4][891][0].apply(exports,arguments)
+},{"dup":891}],911:[function(require,module,exports){
 module["exports"] = [
   "街",
   "路",
@@ -47093,7 +44750,7 @@ module["exports"] = [
   "西路"
 ];
 
-},{}],933:[function(require,module,exports){
+},{}],912:[function(require,module,exports){
 var zh_TW = {};
 module['exports'] = zh_TW;
 zh_TW.title = "Chinese (Taiwan)";
@@ -47101,7 +44758,7 @@ zh_TW.address = require("./address");
 zh_TW.name = require("./name");
 zh_TW.phone_number = require("./phone_number");
 
-},{"./address":926,"./name":935,"./phone_number":939}],934:[function(require,module,exports){
+},{"./address":905,"./name":914,"./phone_number":918}],913:[function(require,module,exports){
 module["exports"] = [
   "王",
   "李",
@@ -47205,9 +44862,9 @@ module["exports"] = [
   "孔"
 ];
 
-},{}],935:[function(require,module,exports){
-arguments[4][897][0].apply(exports,arguments)
-},{"./first_name":934,"./last_name":936,"./name":937,"dup":897}],936:[function(require,module,exports){
+},{}],914:[function(require,module,exports){
+arguments[4][876][0].apply(exports,arguments)
+},{"./first_name":913,"./last_name":915,"./name":916,"dup":876}],915:[function(require,module,exports){
 module["exports"] = [
   "紹齊",
   "博文",
@@ -47334,18 +44991,18 @@ module["exports"] = [
   "聰健"
 ];
 
-},{}],937:[function(require,module,exports){
-arguments[4][918][0].apply(exports,arguments)
-},{"dup":918}],938:[function(require,module,exports){
+},{}],916:[function(require,module,exports){
+arguments[4][897][0].apply(exports,arguments)
+},{"dup":897}],917:[function(require,module,exports){
 module["exports"] = [
   "0#-#######",
   "02-########",
   "09##-######"
 ];
 
-},{}],939:[function(require,module,exports){
-arguments[4][76][0].apply(exports,arguments)
-},{"./formats":938,"dup":76}],940:[function(require,module,exports){
+},{}],918:[function(require,module,exports){
+arguments[4][55][0].apply(exports,arguments)
+},{"./formats":917,"dup":55}],919:[function(require,module,exports){
 
 var Lorem = function (faker) {
   var self = this;
@@ -47399,7 +45056,7 @@ var Lorem = function (faker) {
 
 module["exports"] = Lorem;
 
-},{}],941:[function(require,module,exports){
+},{}],920:[function(require,module,exports){
 function Name (faker) {
 
   this.firstName = function (gender) {
@@ -47497,7 +45154,7 @@ function Name (faker) {
 }
 
 module['exports'] = Name;
-},{}],942:[function(require,module,exports){
+},{}],921:[function(require,module,exports){
 var Phone = function (faker) {
   var self = this;
 
@@ -47521,7 +45178,7 @@ var Phone = function (faker) {
 };
 
 module['exports'] = Phone;
-},{}],943:[function(require,module,exports){
+},{}],922:[function(require,module,exports){
 var mersenne = require('../vendor/mersenne');
 
 function Random (faker, seed) {
@@ -47609,7 +45266,7 @@ module['exports'] = Random;
 
 // module.exports = random;
 
-},{"../vendor/mersenne":944}],944:[function(require,module,exports){
+},{"../vendor/mersenne":923}],923:[function(require,module,exports){
 // this program is a JavaScript version of Mersenne Twister, with concealment and encapsulation in class,
 // an almost straight conversion from the original program, mt19937ar.c,
 // translated by y. okada on July 17, 2006.
@@ -47897,7 +45554,7 @@ exports.seed_array = function(A) {
     gen.init_by_array(A);
 }
 
-},{}],945:[function(require,module,exports){
+},{}],924:[function(require,module,exports){
 /*
  * password-generator
  * Copyright(c) 2011-2013 Bermi Ferrer <bermi@bermilabs.com>
@@ -47963,7 +45620,7 @@ exports.seed_array = function(A) {
 
   // Establish the root object, `window` in the browser, or `global` on the server.
 }(this));
-},{}],946:[function(require,module,exports){
+},{}],925:[function(require,module,exports){
 /*
 
 Copyright (c) 2012-2014 Jeffrey Mealo
@@ -48174,7 +45831,2508 @@ exports.generate = function generate() {
     return browser[random[0]](random[1]);
 };
 
-},{}],947:[function(require,module,exports){
+},{}],926:[function(require,module,exports){
+(function (global){
+/*!
+ * The buffer module from node.js, for the browser.
+ *
+ * @author   Feross Aboukhadijeh <feross@feross.org> <http://feross.org>
+ * @license  MIT
+ */
+/* eslint-disable no-proto */
+
+var base64 = require('base64-js')
+var ieee754 = require('ieee754')
+var isArray = require('is-array')
+
+exports.Buffer = Buffer
+exports.SlowBuffer = SlowBuffer
+exports.INSPECT_MAX_BYTES = 50
+Buffer.poolSize = 8192 // not used by this implementation
+
+var rootParent = {}
+
+/**
+ * If `Buffer.TYPED_ARRAY_SUPPORT`:
+ *   === true    Use Uint8Array implementation (fastest)
+ *   === false   Use Object implementation (most compatible, even IE6)
+ *
+ * Browsers that support typed arrays are IE 10+, Firefox 4+, Chrome 7+, Safari 5.1+,
+ * Opera 11.6+, iOS 4.2+.
+ *
+ * Due to various browser bugs, sometimes the Object implementation will be used even
+ * when the browser supports typed arrays.
+ *
+ * Note:
+ *
+ *   - Firefox 4-29 lacks support for adding new properties to `Uint8Array` instances,
+ *     See: https://bugzilla.mozilla.org/show_bug.cgi?id=695438.
+ *
+ *   - Safari 5-7 lacks support for changing the `Object.prototype.constructor` property
+ *     on objects.
+ *
+ *   - Chrome 9-10 is missing the `TypedArray.prototype.subarray` function.
+ *
+ *   - IE10 has a broken `TypedArray.prototype.subarray` function which returns arrays of
+ *     incorrect length in some situations.
+
+ * We detect these buggy browsers and set `Buffer.TYPED_ARRAY_SUPPORT` to `false` so they
+ * get the Object implementation, which is slower but behaves correctly.
+ */
+Buffer.TYPED_ARRAY_SUPPORT = global.TYPED_ARRAY_SUPPORT !== undefined
+  ? global.TYPED_ARRAY_SUPPORT
+  : typedArraySupport()
+
+function typedArraySupport () {
+  function Bar () {}
+  try {
+    var arr = new Uint8Array(1)
+    arr.foo = function () { return 42 }
+    arr.constructor = Bar
+    return arr.foo() === 42 && // typed array instances can be augmented
+        arr.constructor === Bar && // constructor can be set
+        typeof arr.subarray === 'function' && // chrome 9-10 lack `subarray`
+        arr.subarray(1, 1).byteLength === 0 // ie10 has broken `subarray`
+  } catch (e) {
+    return false
+  }
+}
+
+function kMaxLength () {
+  return Buffer.TYPED_ARRAY_SUPPORT
+    ? 0x7fffffff
+    : 0x3fffffff
+}
+
+/**
+ * Class: Buffer
+ * =============
+ *
+ * The Buffer constructor returns instances of `Uint8Array` that are augmented
+ * with function properties for all the node `Buffer` API functions. We use
+ * `Uint8Array` so that square bracket notation works as expected -- it returns
+ * a single octet.
+ *
+ * By augmenting the instances, we can avoid modifying the `Uint8Array`
+ * prototype.
+ */
+function Buffer (arg) {
+  if (!(this instanceof Buffer)) {
+    // Avoid going through an ArgumentsAdaptorTrampoline in the common case.
+    if (arguments.length > 1) return new Buffer(arg, arguments[1])
+    return new Buffer(arg)
+  }
+
+  this.length = 0
+  this.parent = undefined
+
+  // Common case.
+  if (typeof arg === 'number') {
+    return fromNumber(this, arg)
+  }
+
+  // Slightly less common case.
+  if (typeof arg === 'string') {
+    return fromString(this, arg, arguments.length > 1 ? arguments[1] : 'utf8')
+  }
+
+  // Unusual.
+  return fromObject(this, arg)
+}
+
+function fromNumber (that, length) {
+  that = allocate(that, length < 0 ? 0 : checked(length) | 0)
+  if (!Buffer.TYPED_ARRAY_SUPPORT) {
+    for (var i = 0; i < length; i++) {
+      that[i] = 0
+    }
+  }
+  return that
+}
+
+function fromString (that, string, encoding) {
+  if (typeof encoding !== 'string' || encoding === '') encoding = 'utf8'
+
+  // Assumption: byteLength() return value is always < kMaxLength.
+  var length = byteLength(string, encoding) | 0
+  that = allocate(that, length)
+
+  that.write(string, encoding)
+  return that
+}
+
+function fromObject (that, object) {
+  if (Buffer.isBuffer(object)) return fromBuffer(that, object)
+
+  if (isArray(object)) return fromArray(that, object)
+
+  if (object == null) {
+    throw new TypeError('must start with number, buffer, array or string')
+  }
+
+  if (typeof ArrayBuffer !== 'undefined') {
+    if (object.buffer instanceof ArrayBuffer) {
+      return fromTypedArray(that, object)
+    }
+    if (object instanceof ArrayBuffer) {
+      return fromArrayBuffer(that, object)
+    }
+  }
+
+  if (object.length) return fromArrayLike(that, object)
+
+  return fromJsonObject(that, object)
+}
+
+function fromBuffer (that, buffer) {
+  var length = checked(buffer.length) | 0
+  that = allocate(that, length)
+  buffer.copy(that, 0, 0, length)
+  return that
+}
+
+function fromArray (that, array) {
+  var length = checked(array.length) | 0
+  that = allocate(that, length)
+  for (var i = 0; i < length; i += 1) {
+    that[i] = array[i] & 255
+  }
+  return that
+}
+
+// Duplicate of fromArray() to keep fromArray() monomorphic.
+function fromTypedArray (that, array) {
+  var length = checked(array.length) | 0
+  that = allocate(that, length)
+  // Truncating the elements is probably not what people expect from typed
+  // arrays with BYTES_PER_ELEMENT > 1 but it's compatible with the behavior
+  // of the old Buffer constructor.
+  for (var i = 0; i < length; i += 1) {
+    that[i] = array[i] & 255
+  }
+  return that
+}
+
+function fromArrayBuffer (that, array) {
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    // Return an augmented `Uint8Array` instance, for best performance
+    array.byteLength
+    that = Buffer._augment(new Uint8Array(array))
+  } else {
+    // Fallback: Return an object instance of the Buffer class
+    that = fromTypedArray(that, new Uint8Array(array))
+  }
+  return that
+}
+
+function fromArrayLike (that, array) {
+  var length = checked(array.length) | 0
+  that = allocate(that, length)
+  for (var i = 0; i < length; i += 1) {
+    that[i] = array[i] & 255
+  }
+  return that
+}
+
+// Deserialize { type: 'Buffer', data: [1,2,3,...] } into a Buffer object.
+// Returns a zero-length buffer for inputs that don't conform to the spec.
+function fromJsonObject (that, object) {
+  var array
+  var length = 0
+
+  if (object.type === 'Buffer' && isArray(object.data)) {
+    array = object.data
+    length = checked(array.length) | 0
+  }
+  that = allocate(that, length)
+
+  for (var i = 0; i < length; i += 1) {
+    that[i] = array[i] & 255
+  }
+  return that
+}
+
+if (Buffer.TYPED_ARRAY_SUPPORT) {
+  Buffer.prototype.__proto__ = Uint8Array.prototype
+  Buffer.__proto__ = Uint8Array
+}
+
+function allocate (that, length) {
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    // Return an augmented `Uint8Array` instance, for best performance
+    that = Buffer._augment(new Uint8Array(length))
+    that.__proto__ = Buffer.prototype
+  } else {
+    // Fallback: Return an object instance of the Buffer class
+    that.length = length
+    that._isBuffer = true
+  }
+
+  var fromPool = length !== 0 && length <= Buffer.poolSize >>> 1
+  if (fromPool) that.parent = rootParent
+
+  return that
+}
+
+function checked (length) {
+  // Note: cannot use `length < kMaxLength` here because that fails when
+  // length is NaN (which is otherwise coerced to zero.)
+  if (length >= kMaxLength()) {
+    throw new RangeError('Attempt to allocate Buffer larger than maximum ' +
+                         'size: 0x' + kMaxLength().toString(16) + ' bytes')
+  }
+  return length | 0
+}
+
+function SlowBuffer (subject, encoding) {
+  if (!(this instanceof SlowBuffer)) return new SlowBuffer(subject, encoding)
+
+  var buf = new Buffer(subject, encoding)
+  delete buf.parent
+  return buf
+}
+
+Buffer.isBuffer = function isBuffer (b) {
+  return !!(b != null && b._isBuffer)
+}
+
+Buffer.compare = function compare (a, b) {
+  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
+    throw new TypeError('Arguments must be Buffers')
+  }
+
+  if (a === b) return 0
+
+  var x = a.length
+  var y = b.length
+
+  var i = 0
+  var len = Math.min(x, y)
+  while (i < len) {
+    if (a[i] !== b[i]) break
+
+    ++i
+  }
+
+  if (i !== len) {
+    x = a[i]
+    y = b[i]
+  }
+
+  if (x < y) return -1
+  if (y < x) return 1
+  return 0
+}
+
+Buffer.isEncoding = function isEncoding (encoding) {
+  switch (String(encoding).toLowerCase()) {
+    case 'hex':
+    case 'utf8':
+    case 'utf-8':
+    case 'ascii':
+    case 'binary':
+    case 'base64':
+    case 'raw':
+    case 'ucs2':
+    case 'ucs-2':
+    case 'utf16le':
+    case 'utf-16le':
+      return true
+    default:
+      return false
+  }
+}
+
+Buffer.concat = function concat (list, length) {
+  if (!isArray(list)) throw new TypeError('list argument must be an Array of Buffers.')
+
+  if (list.length === 0) {
+    return new Buffer(0)
+  }
+
+  var i
+  if (length === undefined) {
+    length = 0
+    for (i = 0; i < list.length; i++) {
+      length += list[i].length
+    }
+  }
+
+  var buf = new Buffer(length)
+  var pos = 0
+  for (i = 0; i < list.length; i++) {
+    var item = list[i]
+    item.copy(buf, pos)
+    pos += item.length
+  }
+  return buf
+}
+
+function byteLength (string, encoding) {
+  if (typeof string !== 'string') string = '' + string
+
+  var len = string.length
+  if (len === 0) return 0
+
+  // Use a for loop to avoid recursion
+  var loweredCase = false
+  for (;;) {
+    switch (encoding) {
+      case 'ascii':
+      case 'binary':
+      // Deprecated
+      case 'raw':
+      case 'raws':
+        return len
+      case 'utf8':
+      case 'utf-8':
+        return utf8ToBytes(string).length
+      case 'ucs2':
+      case 'ucs-2':
+      case 'utf16le':
+      case 'utf-16le':
+        return len * 2
+      case 'hex':
+        return len >>> 1
+      case 'base64':
+        return base64ToBytes(string).length
+      default:
+        if (loweredCase) return utf8ToBytes(string).length // assume utf8
+        encoding = ('' + encoding).toLowerCase()
+        loweredCase = true
+    }
+  }
+}
+Buffer.byteLength = byteLength
+
+// pre-set for values that may exist in the future
+Buffer.prototype.length = undefined
+Buffer.prototype.parent = undefined
+
+function slowToString (encoding, start, end) {
+  var loweredCase = false
+
+  start = start | 0
+  end = end === undefined || end === Infinity ? this.length : end | 0
+
+  if (!encoding) encoding = 'utf8'
+  if (start < 0) start = 0
+  if (end > this.length) end = this.length
+  if (end <= start) return ''
+
+  while (true) {
+    switch (encoding) {
+      case 'hex':
+        return hexSlice(this, start, end)
+
+      case 'utf8':
+      case 'utf-8':
+        return utf8Slice(this, start, end)
+
+      case 'ascii':
+        return asciiSlice(this, start, end)
+
+      case 'binary':
+        return binarySlice(this, start, end)
+
+      case 'base64':
+        return base64Slice(this, start, end)
+
+      case 'ucs2':
+      case 'ucs-2':
+      case 'utf16le':
+      case 'utf-16le':
+        return utf16leSlice(this, start, end)
+
+      default:
+        if (loweredCase) throw new TypeError('Unknown encoding: ' + encoding)
+        encoding = (encoding + '').toLowerCase()
+        loweredCase = true
+    }
+  }
+}
+
+Buffer.prototype.toString = function toString () {
+  var length = this.length | 0
+  if (length === 0) return ''
+  if (arguments.length === 0) return utf8Slice(this, 0, length)
+  return slowToString.apply(this, arguments)
+}
+
+Buffer.prototype.equals = function equals (b) {
+  if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
+  if (this === b) return true
+  return Buffer.compare(this, b) === 0
+}
+
+Buffer.prototype.inspect = function inspect () {
+  var str = ''
+  var max = exports.INSPECT_MAX_BYTES
+  if (this.length > 0) {
+    str = this.toString('hex', 0, max).match(/.{2}/g).join(' ')
+    if (this.length > max) str += ' ... '
+  }
+  return '<Buffer ' + str + '>'
+}
+
+Buffer.prototype.compare = function compare (b) {
+  if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
+  if (this === b) return 0
+  return Buffer.compare(this, b)
+}
+
+Buffer.prototype.indexOf = function indexOf (val, byteOffset) {
+  if (byteOffset > 0x7fffffff) byteOffset = 0x7fffffff
+  else if (byteOffset < -0x80000000) byteOffset = -0x80000000
+  byteOffset >>= 0
+
+  if (this.length === 0) return -1
+  if (byteOffset >= this.length) return -1
+
+  // Negative offsets start from the end of the buffer
+  if (byteOffset < 0) byteOffset = Math.max(this.length + byteOffset, 0)
+
+  if (typeof val === 'string') {
+    if (val.length === 0) return -1 // special case: looking for empty string always fails
+    return String.prototype.indexOf.call(this, val, byteOffset)
+  }
+  if (Buffer.isBuffer(val)) {
+    return arrayIndexOf(this, val, byteOffset)
+  }
+  if (typeof val === 'number') {
+    if (Buffer.TYPED_ARRAY_SUPPORT && Uint8Array.prototype.indexOf === 'function') {
+      return Uint8Array.prototype.indexOf.call(this, val, byteOffset)
+    }
+    return arrayIndexOf(this, [ val ], byteOffset)
+  }
+
+  function arrayIndexOf (arr, val, byteOffset) {
+    var foundIndex = -1
+    for (var i = 0; byteOffset + i < arr.length; i++) {
+      if (arr[byteOffset + i] === val[foundIndex === -1 ? 0 : i - foundIndex]) {
+        if (foundIndex === -1) foundIndex = i
+        if (i - foundIndex + 1 === val.length) return byteOffset + foundIndex
+      } else {
+        foundIndex = -1
+      }
+    }
+    return -1
+  }
+
+  throw new TypeError('val must be string, number or Buffer')
+}
+
+// `get` is deprecated
+Buffer.prototype.get = function get (offset) {
+  console.log('.get() is deprecated. Access using array indexes instead.')
+  return this.readUInt8(offset)
+}
+
+// `set` is deprecated
+Buffer.prototype.set = function set (v, offset) {
+  console.log('.set() is deprecated. Access using array indexes instead.')
+  return this.writeUInt8(v, offset)
+}
+
+function hexWrite (buf, string, offset, length) {
+  offset = Number(offset) || 0
+  var remaining = buf.length - offset
+  if (!length) {
+    length = remaining
+  } else {
+    length = Number(length)
+    if (length > remaining) {
+      length = remaining
+    }
+  }
+
+  // must be an even number of digits
+  var strLen = string.length
+  if (strLen % 2 !== 0) throw new Error('Invalid hex string')
+
+  if (length > strLen / 2) {
+    length = strLen / 2
+  }
+  for (var i = 0; i < length; i++) {
+    var parsed = parseInt(string.substr(i * 2, 2), 16)
+    if (isNaN(parsed)) throw new Error('Invalid hex string')
+    buf[offset + i] = parsed
+  }
+  return i
+}
+
+function utf8Write (buf, string, offset, length) {
+  return blitBuffer(utf8ToBytes(string, buf.length - offset), buf, offset, length)
+}
+
+function asciiWrite (buf, string, offset, length) {
+  return blitBuffer(asciiToBytes(string), buf, offset, length)
+}
+
+function binaryWrite (buf, string, offset, length) {
+  return asciiWrite(buf, string, offset, length)
+}
+
+function base64Write (buf, string, offset, length) {
+  return blitBuffer(base64ToBytes(string), buf, offset, length)
+}
+
+function ucs2Write (buf, string, offset, length) {
+  return blitBuffer(utf16leToBytes(string, buf.length - offset), buf, offset, length)
+}
+
+Buffer.prototype.write = function write (string, offset, length, encoding) {
+  // Buffer#write(string)
+  if (offset === undefined) {
+    encoding = 'utf8'
+    length = this.length
+    offset = 0
+  // Buffer#write(string, encoding)
+  } else if (length === undefined && typeof offset === 'string') {
+    encoding = offset
+    length = this.length
+    offset = 0
+  // Buffer#write(string, offset[, length][, encoding])
+  } else if (isFinite(offset)) {
+    offset = offset | 0
+    if (isFinite(length)) {
+      length = length | 0
+      if (encoding === undefined) encoding = 'utf8'
+    } else {
+      encoding = length
+      length = undefined
+    }
+  // legacy write(string, encoding, offset, length) - remove in v0.13
+  } else {
+    var swap = encoding
+    encoding = offset
+    offset = length | 0
+    length = swap
+  }
+
+  var remaining = this.length - offset
+  if (length === undefined || length > remaining) length = remaining
+
+  if ((string.length > 0 && (length < 0 || offset < 0)) || offset > this.length) {
+    throw new RangeError('attempt to write outside buffer bounds')
+  }
+
+  if (!encoding) encoding = 'utf8'
+
+  var loweredCase = false
+  for (;;) {
+    switch (encoding) {
+      case 'hex':
+        return hexWrite(this, string, offset, length)
+
+      case 'utf8':
+      case 'utf-8':
+        return utf8Write(this, string, offset, length)
+
+      case 'ascii':
+        return asciiWrite(this, string, offset, length)
+
+      case 'binary':
+        return binaryWrite(this, string, offset, length)
+
+      case 'base64':
+        // Warning: maxLength not taken into account in base64Write
+        return base64Write(this, string, offset, length)
+
+      case 'ucs2':
+      case 'ucs-2':
+      case 'utf16le':
+      case 'utf-16le':
+        return ucs2Write(this, string, offset, length)
+
+      default:
+        if (loweredCase) throw new TypeError('Unknown encoding: ' + encoding)
+        encoding = ('' + encoding).toLowerCase()
+        loweredCase = true
+    }
+  }
+}
+
+Buffer.prototype.toJSON = function toJSON () {
+  return {
+    type: 'Buffer',
+    data: Array.prototype.slice.call(this._arr || this, 0)
+  }
+}
+
+function base64Slice (buf, start, end) {
+  if (start === 0 && end === buf.length) {
+    return base64.fromByteArray(buf)
+  } else {
+    return base64.fromByteArray(buf.slice(start, end))
+  }
+}
+
+function utf8Slice (buf, start, end) {
+  end = Math.min(buf.length, end)
+  var res = []
+
+  var i = start
+  while (i < end) {
+    var firstByte = buf[i]
+    var codePoint = null
+    var bytesPerSequence = (firstByte > 0xEF) ? 4
+      : (firstByte > 0xDF) ? 3
+      : (firstByte > 0xBF) ? 2
+      : 1
+
+    if (i + bytesPerSequence <= end) {
+      var secondByte, thirdByte, fourthByte, tempCodePoint
+
+      switch (bytesPerSequence) {
+        case 1:
+          if (firstByte < 0x80) {
+            codePoint = firstByte
+          }
+          break
+        case 2:
+          secondByte = buf[i + 1]
+          if ((secondByte & 0xC0) === 0x80) {
+            tempCodePoint = (firstByte & 0x1F) << 0x6 | (secondByte & 0x3F)
+            if (tempCodePoint > 0x7F) {
+              codePoint = tempCodePoint
+            }
+          }
+          break
+        case 3:
+          secondByte = buf[i + 1]
+          thirdByte = buf[i + 2]
+          if ((secondByte & 0xC0) === 0x80 && (thirdByte & 0xC0) === 0x80) {
+            tempCodePoint = (firstByte & 0xF) << 0xC | (secondByte & 0x3F) << 0x6 | (thirdByte & 0x3F)
+            if (tempCodePoint > 0x7FF && (tempCodePoint < 0xD800 || tempCodePoint > 0xDFFF)) {
+              codePoint = tempCodePoint
+            }
+          }
+          break
+        case 4:
+          secondByte = buf[i + 1]
+          thirdByte = buf[i + 2]
+          fourthByte = buf[i + 3]
+          if ((secondByte & 0xC0) === 0x80 && (thirdByte & 0xC0) === 0x80 && (fourthByte & 0xC0) === 0x80) {
+            tempCodePoint = (firstByte & 0xF) << 0x12 | (secondByte & 0x3F) << 0xC | (thirdByte & 0x3F) << 0x6 | (fourthByte & 0x3F)
+            if (tempCodePoint > 0xFFFF && tempCodePoint < 0x110000) {
+              codePoint = tempCodePoint
+            }
+          }
+      }
+    }
+
+    if (codePoint === null) {
+      // we did not generate a valid codePoint so insert a
+      // replacement char (U+FFFD) and advance only 1 byte
+      codePoint = 0xFFFD
+      bytesPerSequence = 1
+    } else if (codePoint > 0xFFFF) {
+      // encode to utf16 (surrogate pair dance)
+      codePoint -= 0x10000
+      res.push(codePoint >>> 10 & 0x3FF | 0xD800)
+      codePoint = 0xDC00 | codePoint & 0x3FF
+    }
+
+    res.push(codePoint)
+    i += bytesPerSequence
+  }
+
+  return decodeCodePointsArray(res)
+}
+
+// Based on http://stackoverflow.com/a/22747272/680742, the browser with
+// the lowest limit is Chrome, with 0x10000 args.
+// We go 1 magnitude less, for safety
+var MAX_ARGUMENTS_LENGTH = 0x1000
+
+function decodeCodePointsArray (codePoints) {
+  var len = codePoints.length
+  if (len <= MAX_ARGUMENTS_LENGTH) {
+    return String.fromCharCode.apply(String, codePoints) // avoid extra slice()
+  }
+
+  // Decode in chunks to avoid "call stack size exceeded".
+  var res = ''
+  var i = 0
+  while (i < len) {
+    res += String.fromCharCode.apply(
+      String,
+      codePoints.slice(i, i += MAX_ARGUMENTS_LENGTH)
+    )
+  }
+  return res
+}
+
+function asciiSlice (buf, start, end) {
+  var ret = ''
+  end = Math.min(buf.length, end)
+
+  for (var i = start; i < end; i++) {
+    ret += String.fromCharCode(buf[i] & 0x7F)
+  }
+  return ret
+}
+
+function binarySlice (buf, start, end) {
+  var ret = ''
+  end = Math.min(buf.length, end)
+
+  for (var i = start; i < end; i++) {
+    ret += String.fromCharCode(buf[i])
+  }
+  return ret
+}
+
+function hexSlice (buf, start, end) {
+  var len = buf.length
+
+  if (!start || start < 0) start = 0
+  if (!end || end < 0 || end > len) end = len
+
+  var out = ''
+  for (var i = start; i < end; i++) {
+    out += toHex(buf[i])
+  }
+  return out
+}
+
+function utf16leSlice (buf, start, end) {
+  var bytes = buf.slice(start, end)
+  var res = ''
+  for (var i = 0; i < bytes.length; i += 2) {
+    res += String.fromCharCode(bytes[i] + bytes[i + 1] * 256)
+  }
+  return res
+}
+
+Buffer.prototype.slice = function slice (start, end) {
+  var len = this.length
+  start = ~~start
+  end = end === undefined ? len : ~~end
+
+  if (start < 0) {
+    start += len
+    if (start < 0) start = 0
+  } else if (start > len) {
+    start = len
+  }
+
+  if (end < 0) {
+    end += len
+    if (end < 0) end = 0
+  } else if (end > len) {
+    end = len
+  }
+
+  if (end < start) end = start
+
+  var newBuf
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    newBuf = Buffer._augment(this.subarray(start, end))
+  } else {
+    var sliceLen = end - start
+    newBuf = new Buffer(sliceLen, undefined)
+    for (var i = 0; i < sliceLen; i++) {
+      newBuf[i] = this[i + start]
+    }
+  }
+
+  if (newBuf.length) newBuf.parent = this.parent || this
+
+  return newBuf
+}
+
+/*
+ * Need to make sure that buffer isn't trying to write out of bounds.
+ */
+function checkOffset (offset, ext, length) {
+  if ((offset % 1) !== 0 || offset < 0) throw new RangeError('offset is not uint')
+  if (offset + ext > length) throw new RangeError('Trying to access beyond buffer length')
+}
+
+Buffer.prototype.readUIntLE = function readUIntLE (offset, byteLength, noAssert) {
+  offset = offset | 0
+  byteLength = byteLength | 0
+  if (!noAssert) checkOffset(offset, byteLength, this.length)
+
+  var val = this[offset]
+  var mul = 1
+  var i = 0
+  while (++i < byteLength && (mul *= 0x100)) {
+    val += this[offset + i] * mul
+  }
+
+  return val
+}
+
+Buffer.prototype.readUIntBE = function readUIntBE (offset, byteLength, noAssert) {
+  offset = offset | 0
+  byteLength = byteLength | 0
+  if (!noAssert) {
+    checkOffset(offset, byteLength, this.length)
+  }
+
+  var val = this[offset + --byteLength]
+  var mul = 1
+  while (byteLength > 0 && (mul *= 0x100)) {
+    val += this[offset + --byteLength] * mul
+  }
+
+  return val
+}
+
+Buffer.prototype.readUInt8 = function readUInt8 (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 1, this.length)
+  return this[offset]
+}
+
+Buffer.prototype.readUInt16LE = function readUInt16LE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 2, this.length)
+  return this[offset] | (this[offset + 1] << 8)
+}
+
+Buffer.prototype.readUInt16BE = function readUInt16BE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 2, this.length)
+  return (this[offset] << 8) | this[offset + 1]
+}
+
+Buffer.prototype.readUInt32LE = function readUInt32LE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 4, this.length)
+
+  return ((this[offset]) |
+      (this[offset + 1] << 8) |
+      (this[offset + 2] << 16)) +
+      (this[offset + 3] * 0x1000000)
+}
+
+Buffer.prototype.readUInt32BE = function readUInt32BE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 4, this.length)
+
+  return (this[offset] * 0x1000000) +
+    ((this[offset + 1] << 16) |
+    (this[offset + 2] << 8) |
+    this[offset + 3])
+}
+
+Buffer.prototype.readIntLE = function readIntLE (offset, byteLength, noAssert) {
+  offset = offset | 0
+  byteLength = byteLength | 0
+  if (!noAssert) checkOffset(offset, byteLength, this.length)
+
+  var val = this[offset]
+  var mul = 1
+  var i = 0
+  while (++i < byteLength && (mul *= 0x100)) {
+    val += this[offset + i] * mul
+  }
+  mul *= 0x80
+
+  if (val >= mul) val -= Math.pow(2, 8 * byteLength)
+
+  return val
+}
+
+Buffer.prototype.readIntBE = function readIntBE (offset, byteLength, noAssert) {
+  offset = offset | 0
+  byteLength = byteLength | 0
+  if (!noAssert) checkOffset(offset, byteLength, this.length)
+
+  var i = byteLength
+  var mul = 1
+  var val = this[offset + --i]
+  while (i > 0 && (mul *= 0x100)) {
+    val += this[offset + --i] * mul
+  }
+  mul *= 0x80
+
+  if (val >= mul) val -= Math.pow(2, 8 * byteLength)
+
+  return val
+}
+
+Buffer.prototype.readInt8 = function readInt8 (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 1, this.length)
+  if (!(this[offset] & 0x80)) return (this[offset])
+  return ((0xff - this[offset] + 1) * -1)
+}
+
+Buffer.prototype.readInt16LE = function readInt16LE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 2, this.length)
+  var val = this[offset] | (this[offset + 1] << 8)
+  return (val & 0x8000) ? val | 0xFFFF0000 : val
+}
+
+Buffer.prototype.readInt16BE = function readInt16BE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 2, this.length)
+  var val = this[offset + 1] | (this[offset] << 8)
+  return (val & 0x8000) ? val | 0xFFFF0000 : val
+}
+
+Buffer.prototype.readInt32LE = function readInt32LE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 4, this.length)
+
+  return (this[offset]) |
+    (this[offset + 1] << 8) |
+    (this[offset + 2] << 16) |
+    (this[offset + 3] << 24)
+}
+
+Buffer.prototype.readInt32BE = function readInt32BE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 4, this.length)
+
+  return (this[offset] << 24) |
+    (this[offset + 1] << 16) |
+    (this[offset + 2] << 8) |
+    (this[offset + 3])
+}
+
+Buffer.prototype.readFloatLE = function readFloatLE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 4, this.length)
+  return ieee754.read(this, offset, true, 23, 4)
+}
+
+Buffer.prototype.readFloatBE = function readFloatBE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 4, this.length)
+  return ieee754.read(this, offset, false, 23, 4)
+}
+
+Buffer.prototype.readDoubleLE = function readDoubleLE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 8, this.length)
+  return ieee754.read(this, offset, true, 52, 8)
+}
+
+Buffer.prototype.readDoubleBE = function readDoubleBE (offset, noAssert) {
+  if (!noAssert) checkOffset(offset, 8, this.length)
+  return ieee754.read(this, offset, false, 52, 8)
+}
+
+function checkInt (buf, value, offset, ext, max, min) {
+  if (!Buffer.isBuffer(buf)) throw new TypeError('buffer must be a Buffer instance')
+  if (value > max || value < min) throw new RangeError('value is out of bounds')
+  if (offset + ext > buf.length) throw new RangeError('index out of range')
+}
+
+Buffer.prototype.writeUIntLE = function writeUIntLE (value, offset, byteLength, noAssert) {
+  value = +value
+  offset = offset | 0
+  byteLength = byteLength | 0
+  if (!noAssert) checkInt(this, value, offset, byteLength, Math.pow(2, 8 * byteLength), 0)
+
+  var mul = 1
+  var i = 0
+  this[offset] = value & 0xFF
+  while (++i < byteLength && (mul *= 0x100)) {
+    this[offset + i] = (value / mul) & 0xFF
+  }
+
+  return offset + byteLength
+}
+
+Buffer.prototype.writeUIntBE = function writeUIntBE (value, offset, byteLength, noAssert) {
+  value = +value
+  offset = offset | 0
+  byteLength = byteLength | 0
+  if (!noAssert) checkInt(this, value, offset, byteLength, Math.pow(2, 8 * byteLength), 0)
+
+  var i = byteLength - 1
+  var mul = 1
+  this[offset + i] = value & 0xFF
+  while (--i >= 0 && (mul *= 0x100)) {
+    this[offset + i] = (value / mul) & 0xFF
+  }
+
+  return offset + byteLength
+}
+
+Buffer.prototype.writeUInt8 = function writeUInt8 (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 1, 0xff, 0)
+  if (!Buffer.TYPED_ARRAY_SUPPORT) value = Math.floor(value)
+  this[offset] = (value & 0xff)
+  return offset + 1
+}
+
+function objectWriteUInt16 (buf, value, offset, littleEndian) {
+  if (value < 0) value = 0xffff + value + 1
+  for (var i = 0, j = Math.min(buf.length - offset, 2); i < j; i++) {
+    buf[offset + i] = (value & (0xff << (8 * (littleEndian ? i : 1 - i)))) >>>
+      (littleEndian ? i : 1 - i) * 8
+  }
+}
+
+Buffer.prototype.writeUInt16LE = function writeUInt16LE (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 2, 0xffff, 0)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value & 0xff)
+    this[offset + 1] = (value >>> 8)
+  } else {
+    objectWriteUInt16(this, value, offset, true)
+  }
+  return offset + 2
+}
+
+Buffer.prototype.writeUInt16BE = function writeUInt16BE (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 2, 0xffff, 0)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 8)
+    this[offset + 1] = (value & 0xff)
+  } else {
+    objectWriteUInt16(this, value, offset, false)
+  }
+  return offset + 2
+}
+
+function objectWriteUInt32 (buf, value, offset, littleEndian) {
+  if (value < 0) value = 0xffffffff + value + 1
+  for (var i = 0, j = Math.min(buf.length - offset, 4); i < j; i++) {
+    buf[offset + i] = (value >>> (littleEndian ? i : 3 - i) * 8) & 0xff
+  }
+}
+
+Buffer.prototype.writeUInt32LE = function writeUInt32LE (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 4, 0xffffffff, 0)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset + 3] = (value >>> 24)
+    this[offset + 2] = (value >>> 16)
+    this[offset + 1] = (value >>> 8)
+    this[offset] = (value & 0xff)
+  } else {
+    objectWriteUInt32(this, value, offset, true)
+  }
+  return offset + 4
+}
+
+Buffer.prototype.writeUInt32BE = function writeUInt32BE (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 4, 0xffffffff, 0)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 24)
+    this[offset + 1] = (value >>> 16)
+    this[offset + 2] = (value >>> 8)
+    this[offset + 3] = (value & 0xff)
+  } else {
+    objectWriteUInt32(this, value, offset, false)
+  }
+  return offset + 4
+}
+
+Buffer.prototype.writeIntLE = function writeIntLE (value, offset, byteLength, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) {
+    var limit = Math.pow(2, 8 * byteLength - 1)
+
+    checkInt(this, value, offset, byteLength, limit - 1, -limit)
+  }
+
+  var i = 0
+  var mul = 1
+  var sub = value < 0 ? 1 : 0
+  this[offset] = value & 0xFF
+  while (++i < byteLength && (mul *= 0x100)) {
+    this[offset + i] = ((value / mul) >> 0) - sub & 0xFF
+  }
+
+  return offset + byteLength
+}
+
+Buffer.prototype.writeIntBE = function writeIntBE (value, offset, byteLength, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) {
+    var limit = Math.pow(2, 8 * byteLength - 1)
+
+    checkInt(this, value, offset, byteLength, limit - 1, -limit)
+  }
+
+  var i = byteLength - 1
+  var mul = 1
+  var sub = value < 0 ? 1 : 0
+  this[offset + i] = value & 0xFF
+  while (--i >= 0 && (mul *= 0x100)) {
+    this[offset + i] = ((value / mul) >> 0) - sub & 0xFF
+  }
+
+  return offset + byteLength
+}
+
+Buffer.prototype.writeInt8 = function writeInt8 (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 1, 0x7f, -0x80)
+  if (!Buffer.TYPED_ARRAY_SUPPORT) value = Math.floor(value)
+  if (value < 0) value = 0xff + value + 1
+  this[offset] = (value & 0xff)
+  return offset + 1
+}
+
+Buffer.prototype.writeInt16LE = function writeInt16LE (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 2, 0x7fff, -0x8000)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value & 0xff)
+    this[offset + 1] = (value >>> 8)
+  } else {
+    objectWriteUInt16(this, value, offset, true)
+  }
+  return offset + 2
+}
+
+Buffer.prototype.writeInt16BE = function writeInt16BE (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 2, 0x7fff, -0x8000)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 8)
+    this[offset + 1] = (value & 0xff)
+  } else {
+    objectWriteUInt16(this, value, offset, false)
+  }
+  return offset + 2
+}
+
+Buffer.prototype.writeInt32LE = function writeInt32LE (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 4, 0x7fffffff, -0x80000000)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value & 0xff)
+    this[offset + 1] = (value >>> 8)
+    this[offset + 2] = (value >>> 16)
+    this[offset + 3] = (value >>> 24)
+  } else {
+    objectWriteUInt32(this, value, offset, true)
+  }
+  return offset + 4
+}
+
+Buffer.prototype.writeInt32BE = function writeInt32BE (value, offset, noAssert) {
+  value = +value
+  offset = offset | 0
+  if (!noAssert) checkInt(this, value, offset, 4, 0x7fffffff, -0x80000000)
+  if (value < 0) value = 0xffffffff + value + 1
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 24)
+    this[offset + 1] = (value >>> 16)
+    this[offset + 2] = (value >>> 8)
+    this[offset + 3] = (value & 0xff)
+  } else {
+    objectWriteUInt32(this, value, offset, false)
+  }
+  return offset + 4
+}
+
+function checkIEEE754 (buf, value, offset, ext, max, min) {
+  if (value > max || value < min) throw new RangeError('value is out of bounds')
+  if (offset + ext > buf.length) throw new RangeError('index out of range')
+  if (offset < 0) throw new RangeError('index out of range')
+}
+
+function writeFloat (buf, value, offset, littleEndian, noAssert) {
+  if (!noAssert) {
+    checkIEEE754(buf, value, offset, 4, 3.4028234663852886e+38, -3.4028234663852886e+38)
+  }
+  ieee754.write(buf, value, offset, littleEndian, 23, 4)
+  return offset + 4
+}
+
+Buffer.prototype.writeFloatLE = function writeFloatLE (value, offset, noAssert) {
+  return writeFloat(this, value, offset, true, noAssert)
+}
+
+Buffer.prototype.writeFloatBE = function writeFloatBE (value, offset, noAssert) {
+  return writeFloat(this, value, offset, false, noAssert)
+}
+
+function writeDouble (buf, value, offset, littleEndian, noAssert) {
+  if (!noAssert) {
+    checkIEEE754(buf, value, offset, 8, 1.7976931348623157E+308, -1.7976931348623157E+308)
+  }
+  ieee754.write(buf, value, offset, littleEndian, 52, 8)
+  return offset + 8
+}
+
+Buffer.prototype.writeDoubleLE = function writeDoubleLE (value, offset, noAssert) {
+  return writeDouble(this, value, offset, true, noAssert)
+}
+
+Buffer.prototype.writeDoubleBE = function writeDoubleBE (value, offset, noAssert) {
+  return writeDouble(this, value, offset, false, noAssert)
+}
+
+// copy(targetBuffer, targetStart=0, sourceStart=0, sourceEnd=buffer.length)
+Buffer.prototype.copy = function copy (target, targetStart, start, end) {
+  if (!start) start = 0
+  if (!end && end !== 0) end = this.length
+  if (targetStart >= target.length) targetStart = target.length
+  if (!targetStart) targetStart = 0
+  if (end > 0 && end < start) end = start
+
+  // Copy 0 bytes; we're done
+  if (end === start) return 0
+  if (target.length === 0 || this.length === 0) return 0
+
+  // Fatal error conditions
+  if (targetStart < 0) {
+    throw new RangeError('targetStart out of bounds')
+  }
+  if (start < 0 || start >= this.length) throw new RangeError('sourceStart out of bounds')
+  if (end < 0) throw new RangeError('sourceEnd out of bounds')
+
+  // Are we oob?
+  if (end > this.length) end = this.length
+  if (target.length - targetStart < end - start) {
+    end = target.length - targetStart + start
+  }
+
+  var len = end - start
+  var i
+
+  if (this === target && start < targetStart && targetStart < end) {
+    // descending copy from end
+    for (i = len - 1; i >= 0; i--) {
+      target[i + targetStart] = this[i + start]
+    }
+  } else if (len < 1000 || !Buffer.TYPED_ARRAY_SUPPORT) {
+    // ascending copy from start
+    for (i = 0; i < len; i++) {
+      target[i + targetStart] = this[i + start]
+    }
+  } else {
+    target._set(this.subarray(start, start + len), targetStart)
+  }
+
+  return len
+}
+
+// fill(value, start=0, end=buffer.length)
+Buffer.prototype.fill = function fill (value, start, end) {
+  if (!value) value = 0
+  if (!start) start = 0
+  if (!end) end = this.length
+
+  if (end < start) throw new RangeError('end < start')
+
+  // Fill 0 bytes; we're done
+  if (end === start) return
+  if (this.length === 0) return
+
+  if (start < 0 || start >= this.length) throw new RangeError('start out of bounds')
+  if (end < 0 || end > this.length) throw new RangeError('end out of bounds')
+
+  var i
+  if (typeof value === 'number') {
+    for (i = start; i < end; i++) {
+      this[i] = value
+    }
+  } else {
+    var bytes = utf8ToBytes(value.toString())
+    var len = bytes.length
+    for (i = start; i < end; i++) {
+      this[i] = bytes[i % len]
+    }
+  }
+
+  return this
+}
+
+/**
+ * Creates a new `ArrayBuffer` with the *copied* memory of the buffer instance.
+ * Added in Node 0.12. Only available in browsers that support ArrayBuffer.
+ */
+Buffer.prototype.toArrayBuffer = function toArrayBuffer () {
+  if (typeof Uint8Array !== 'undefined') {
+    if (Buffer.TYPED_ARRAY_SUPPORT) {
+      return (new Buffer(this)).buffer
+    } else {
+      var buf = new Uint8Array(this.length)
+      for (var i = 0, len = buf.length; i < len; i += 1) {
+        buf[i] = this[i]
+      }
+      return buf.buffer
+    }
+  } else {
+    throw new TypeError('Buffer.toArrayBuffer not supported in this browser')
+  }
+}
+
+// HELPER FUNCTIONS
+// ================
+
+var BP = Buffer.prototype
+
+/**
+ * Augment a Uint8Array *instance* (not the Uint8Array class!) with Buffer methods
+ */
+Buffer._augment = function _augment (arr) {
+  arr.constructor = Buffer
+  arr._isBuffer = true
+
+  // save reference to original Uint8Array set method before overwriting
+  arr._set = arr.set
+
+  // deprecated
+  arr.get = BP.get
+  arr.set = BP.set
+
+  arr.write = BP.write
+  arr.toString = BP.toString
+  arr.toLocaleString = BP.toString
+  arr.toJSON = BP.toJSON
+  arr.equals = BP.equals
+  arr.compare = BP.compare
+  arr.indexOf = BP.indexOf
+  arr.copy = BP.copy
+  arr.slice = BP.slice
+  arr.readUIntLE = BP.readUIntLE
+  arr.readUIntBE = BP.readUIntBE
+  arr.readUInt8 = BP.readUInt8
+  arr.readUInt16LE = BP.readUInt16LE
+  arr.readUInt16BE = BP.readUInt16BE
+  arr.readUInt32LE = BP.readUInt32LE
+  arr.readUInt32BE = BP.readUInt32BE
+  arr.readIntLE = BP.readIntLE
+  arr.readIntBE = BP.readIntBE
+  arr.readInt8 = BP.readInt8
+  arr.readInt16LE = BP.readInt16LE
+  arr.readInt16BE = BP.readInt16BE
+  arr.readInt32LE = BP.readInt32LE
+  arr.readInt32BE = BP.readInt32BE
+  arr.readFloatLE = BP.readFloatLE
+  arr.readFloatBE = BP.readFloatBE
+  arr.readDoubleLE = BP.readDoubleLE
+  arr.readDoubleBE = BP.readDoubleBE
+  arr.writeUInt8 = BP.writeUInt8
+  arr.writeUIntLE = BP.writeUIntLE
+  arr.writeUIntBE = BP.writeUIntBE
+  arr.writeUInt16LE = BP.writeUInt16LE
+  arr.writeUInt16BE = BP.writeUInt16BE
+  arr.writeUInt32LE = BP.writeUInt32LE
+  arr.writeUInt32BE = BP.writeUInt32BE
+  arr.writeIntLE = BP.writeIntLE
+  arr.writeIntBE = BP.writeIntBE
+  arr.writeInt8 = BP.writeInt8
+  arr.writeInt16LE = BP.writeInt16LE
+  arr.writeInt16BE = BP.writeInt16BE
+  arr.writeInt32LE = BP.writeInt32LE
+  arr.writeInt32BE = BP.writeInt32BE
+  arr.writeFloatLE = BP.writeFloatLE
+  arr.writeFloatBE = BP.writeFloatBE
+  arr.writeDoubleLE = BP.writeDoubleLE
+  arr.writeDoubleBE = BP.writeDoubleBE
+  arr.fill = BP.fill
+  arr.inspect = BP.inspect
+  arr.toArrayBuffer = BP.toArrayBuffer
+
+  return arr
+}
+
+var INVALID_BASE64_RE = /[^+\/0-9A-Za-z-_]/g
+
+function base64clean (str) {
+  // Node strips out invalid characters like \n and \t from the string, base64-js does not
+  str = stringtrim(str).replace(INVALID_BASE64_RE, '')
+  // Node converts strings with length < 2 to ''
+  if (str.length < 2) return ''
+  // Node allows for non-padded base64 strings (missing trailing ===), base64-js does not
+  while (str.length % 4 !== 0) {
+    str = str + '='
+  }
+  return str
+}
+
+function stringtrim (str) {
+  if (str.trim) return str.trim()
+  return str.replace(/^\s+|\s+$/g, '')
+}
+
+function toHex (n) {
+  if (n < 16) return '0' + n.toString(16)
+  return n.toString(16)
+}
+
+function utf8ToBytes (string, units) {
+  units = units || Infinity
+  var codePoint
+  var length = string.length
+  var leadSurrogate = null
+  var bytes = []
+
+  for (var i = 0; i < length; i++) {
+    codePoint = string.charCodeAt(i)
+
+    // is surrogate component
+    if (codePoint > 0xD7FF && codePoint < 0xE000) {
+      // last char was a lead
+      if (!leadSurrogate) {
+        // no lead yet
+        if (codePoint > 0xDBFF) {
+          // unexpected trail
+          if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+          continue
+        } else if (i + 1 === length) {
+          // unpaired lead
+          if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+          continue
+        }
+
+        // valid lead
+        leadSurrogate = codePoint
+
+        continue
+      }
+
+      // 2 leads in a row
+      if (codePoint < 0xDC00) {
+        if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+        leadSurrogate = codePoint
+        continue
+      }
+
+      // valid surrogate pair
+      codePoint = (leadSurrogate - 0xD800 << 10 | codePoint - 0xDC00) + 0x10000
+    } else if (leadSurrogate) {
+      // valid bmp char, but last char was a lead
+      if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+    }
+
+    leadSurrogate = null
+
+    // encode utf8
+    if (codePoint < 0x80) {
+      if ((units -= 1) < 0) break
+      bytes.push(codePoint)
+    } else if (codePoint < 0x800) {
+      if ((units -= 2) < 0) break
+      bytes.push(
+        codePoint >> 0x6 | 0xC0,
+        codePoint & 0x3F | 0x80
+      )
+    } else if (codePoint < 0x10000) {
+      if ((units -= 3) < 0) break
+      bytes.push(
+        codePoint >> 0xC | 0xE0,
+        codePoint >> 0x6 & 0x3F | 0x80,
+        codePoint & 0x3F | 0x80
+      )
+    } else if (codePoint < 0x110000) {
+      if ((units -= 4) < 0) break
+      bytes.push(
+        codePoint >> 0x12 | 0xF0,
+        codePoint >> 0xC & 0x3F | 0x80,
+        codePoint >> 0x6 & 0x3F | 0x80,
+        codePoint & 0x3F | 0x80
+      )
+    } else {
+      throw new Error('Invalid code point')
+    }
+  }
+
+  return bytes
+}
+
+function asciiToBytes (str) {
+  var byteArray = []
+  for (var i = 0; i < str.length; i++) {
+    // Node's code seems to be doing this and not & 0x7F..
+    byteArray.push(str.charCodeAt(i) & 0xFF)
+  }
+  return byteArray
+}
+
+function utf16leToBytes (str, units) {
+  var c, hi, lo
+  var byteArray = []
+  for (var i = 0; i < str.length; i++) {
+    if ((units -= 2) < 0) break
+
+    c = str.charCodeAt(i)
+    hi = c >> 8
+    lo = c % 256
+    byteArray.push(lo)
+    byteArray.push(hi)
+  }
+
+  return byteArray
+}
+
+function base64ToBytes (str) {
+  return base64.toByteArray(base64clean(str))
+}
+
+function blitBuffer (src, dst, offset, length) {
+  for (var i = 0; i < length; i++) {
+    if ((i + offset >= dst.length) || (i >= src.length)) break
+    dst[i + offset] = src[i]
+  }
+  return i
+}
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{"base64-js":927,"ieee754":928,"is-array":929}],927:[function(require,module,exports){
+var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+;(function (exports) {
+	'use strict';
+
+  var Arr = (typeof Uint8Array !== 'undefined')
+    ? Uint8Array
+    : Array
+
+	var PLUS   = '+'.charCodeAt(0)
+	var SLASH  = '/'.charCodeAt(0)
+	var NUMBER = '0'.charCodeAt(0)
+	var LOWER  = 'a'.charCodeAt(0)
+	var UPPER  = 'A'.charCodeAt(0)
+	var PLUS_URL_SAFE = '-'.charCodeAt(0)
+	var SLASH_URL_SAFE = '_'.charCodeAt(0)
+
+	function decode (elt) {
+		var code = elt.charCodeAt(0)
+		if (code === PLUS ||
+		    code === PLUS_URL_SAFE)
+			return 62 // '+'
+		if (code === SLASH ||
+		    code === SLASH_URL_SAFE)
+			return 63 // '/'
+		if (code < NUMBER)
+			return -1 //no match
+		if (code < NUMBER + 10)
+			return code - NUMBER + 26 + 26
+		if (code < UPPER + 26)
+			return code - UPPER
+		if (code < LOWER + 26)
+			return code - LOWER + 26
+	}
+
+	function b64ToByteArray (b64) {
+		var i, j, l, tmp, placeHolders, arr
+
+		if (b64.length % 4 > 0) {
+			throw new Error('Invalid string. Length must be a multiple of 4')
+		}
+
+		// the number of equal signs (place holders)
+		// if there are two placeholders, than the two characters before it
+		// represent one byte
+		// if there is only one, then the three characters before it represent 2 bytes
+		// this is just a cheap hack to not do indexOf twice
+		var len = b64.length
+		placeHolders = '=' === b64.charAt(len - 2) ? 2 : '=' === b64.charAt(len - 1) ? 1 : 0
+
+		// base64 is 4/3 + up to two characters of the original data
+		arr = new Arr(b64.length * 3 / 4 - placeHolders)
+
+		// if there are placeholders, only get up to the last complete 4 chars
+		l = placeHolders > 0 ? b64.length - 4 : b64.length
+
+		var L = 0
+
+		function push (v) {
+			arr[L++] = v
+		}
+
+		for (i = 0, j = 0; i < l; i += 4, j += 3) {
+			tmp = (decode(b64.charAt(i)) << 18) | (decode(b64.charAt(i + 1)) << 12) | (decode(b64.charAt(i + 2)) << 6) | decode(b64.charAt(i + 3))
+			push((tmp & 0xFF0000) >> 16)
+			push((tmp & 0xFF00) >> 8)
+			push(tmp & 0xFF)
+		}
+
+		if (placeHolders === 2) {
+			tmp = (decode(b64.charAt(i)) << 2) | (decode(b64.charAt(i + 1)) >> 4)
+			push(tmp & 0xFF)
+		} else if (placeHolders === 1) {
+			tmp = (decode(b64.charAt(i)) << 10) | (decode(b64.charAt(i + 1)) << 4) | (decode(b64.charAt(i + 2)) >> 2)
+			push((tmp >> 8) & 0xFF)
+			push(tmp & 0xFF)
+		}
+
+		return arr
+	}
+
+	function uint8ToBase64 (uint8) {
+		var i,
+			extraBytes = uint8.length % 3, // if we have 1 byte left, pad 2 bytes
+			output = "",
+			temp, length
+
+		function encode (num) {
+			return lookup.charAt(num)
+		}
+
+		function tripletToBase64 (num) {
+			return encode(num >> 18 & 0x3F) + encode(num >> 12 & 0x3F) + encode(num >> 6 & 0x3F) + encode(num & 0x3F)
+		}
+
+		// go through the array every three bytes, we'll deal with trailing stuff later
+		for (i = 0, length = uint8.length - extraBytes; i < length; i += 3) {
+			temp = (uint8[i] << 16) + (uint8[i + 1] << 8) + (uint8[i + 2])
+			output += tripletToBase64(temp)
+		}
+
+		// pad the end with zeros, but make sure to not forget the extra bytes
+		switch (extraBytes) {
+			case 1:
+				temp = uint8[uint8.length - 1]
+				output += encode(temp >> 2)
+				output += encode((temp << 4) & 0x3F)
+				output += '=='
+				break
+			case 2:
+				temp = (uint8[uint8.length - 2] << 8) + (uint8[uint8.length - 1])
+				output += encode(temp >> 10)
+				output += encode((temp >> 4) & 0x3F)
+				output += encode((temp << 2) & 0x3F)
+				output += '='
+				break
+		}
+
+		return output
+	}
+
+	exports.toByteArray = b64ToByteArray
+	exports.fromByteArray = uint8ToBase64
+}(typeof exports === 'undefined' ? (this.base64js = {}) : exports))
+
+},{}],928:[function(require,module,exports){
+exports.read = function (buffer, offset, isLE, mLen, nBytes) {
+  var e, m
+  var eLen = nBytes * 8 - mLen - 1
+  var eMax = (1 << eLen) - 1
+  var eBias = eMax >> 1
+  var nBits = -7
+  var i = isLE ? (nBytes - 1) : 0
+  var d = isLE ? -1 : 1
+  var s = buffer[offset + i]
+
+  i += d
+
+  e = s & ((1 << (-nBits)) - 1)
+  s >>= (-nBits)
+  nBits += eLen
+  for (; nBits > 0; e = e * 256 + buffer[offset + i], i += d, nBits -= 8) {}
+
+  m = e & ((1 << (-nBits)) - 1)
+  e >>= (-nBits)
+  nBits += mLen
+  for (; nBits > 0; m = m * 256 + buffer[offset + i], i += d, nBits -= 8) {}
+
+  if (e === 0) {
+    e = 1 - eBias
+  } else if (e === eMax) {
+    return m ? NaN : ((s ? -1 : 1) * Infinity)
+  } else {
+    m = m + Math.pow(2, mLen)
+    e = e - eBias
+  }
+  return (s ? -1 : 1) * m * Math.pow(2, e - mLen)
+}
+
+exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
+  var e, m, c
+  var eLen = nBytes * 8 - mLen - 1
+  var eMax = (1 << eLen) - 1
+  var eBias = eMax >> 1
+  var rt = (mLen === 23 ? Math.pow(2, -24) - Math.pow(2, -77) : 0)
+  var i = isLE ? 0 : (nBytes - 1)
+  var d = isLE ? 1 : -1
+  var s = value < 0 || (value === 0 && 1 / value < 0) ? 1 : 0
+
+  value = Math.abs(value)
+
+  if (isNaN(value) || value === Infinity) {
+    m = isNaN(value) ? 1 : 0
+    e = eMax
+  } else {
+    e = Math.floor(Math.log(value) / Math.LN2)
+    if (value * (c = Math.pow(2, -e)) < 1) {
+      e--
+      c *= 2
+    }
+    if (e + eBias >= 1) {
+      value += rt / c
+    } else {
+      value += rt * Math.pow(2, 1 - eBias)
+    }
+    if (value * c >= 2) {
+      e++
+      c /= 2
+    }
+
+    if (e + eBias >= eMax) {
+      m = 0
+      e = eMax
+    } else if (e + eBias >= 1) {
+      m = (value * c - 1) * Math.pow(2, mLen)
+      e = e + eBias
+    } else {
+      m = value * Math.pow(2, eBias - 1) * Math.pow(2, mLen)
+      e = 0
+    }
+  }
+
+  for (; mLen >= 8; buffer[offset + i] = m & 0xff, i += d, m /= 256, mLen -= 8) {}
+
+  e = (e << mLen) | m
+  eLen += mLen
+  for (; eLen > 0; buffer[offset + i] = e & 0xff, i += d, e /= 256, eLen -= 8) {}
+
+  buffer[offset + i - d] |= s * 128
+}
+
+},{}],929:[function(require,module,exports){
+
+/**
+ * isArray
+ */
+
+var isArray = Array.isArray;
+
+/**
+ * toString
+ */
+
+var str = Object.prototype.toString;
+
+/**
+ * Whether or not the given `val`
+ * is an array.
+ *
+ * example:
+ *
+ *        isArray([]);
+ *        // > true
+ *        isArray(arguments);
+ *        // > false
+ *        isArray('');
+ *        // > false
+ *
+ * @param {mixed} val
+ * @return {bool}
+ */
+
+module.exports = isArray || function (val) {
+  return !! val && '[object Array]' == str.call(val);
+};
+
+},{}],930:[function(require,module,exports){
+'use strict';
+
+var container = require('./util/container'),
+    traverse = require('./util/traverse'),
+    formats = require('./util/formats'),
+    random = require('./util/random'),
+    merge = require('./util/merge');
+
+var deref = require('deref');
+
+function isKey(prop) {
+  return prop === 'enum' || prop === 'required' || prop === 'definitions';
+}
+
+function generate(schema, refs, ex) {
+  var $ = deref();
+
+  try {
+    var max = 100;
+
+    return traverse($(schema, refs, ex), [], function reduce(sub) {
+      if (!max) {
+        delete sub.$ref;
+        delete sub.oneOf;
+        delete sub.anyOf;
+        delete sub.allOf;
+        return sub;
+      }
+
+      if (sub.$ref) {
+        var id = sub.$ref;
+
+        delete sub.$ref;
+
+        max--;
+
+        merge(sub, $.util.findByRef(id, $.refs));
+      }
+
+      if (sub.allOf) {
+        var schemas = sub.allOf;
+
+        delete sub.allOf;
+
+        schemas.forEach(function(s) {
+          merge(sub, reduce(s));
+        });
+      }
+
+      if (sub.oneOf || sub.anyOf) {
+        var mix = sub.oneOf || sub.anyOf;
+
+        delete sub.anyOf;
+        delete sub.oneOf;
+
+        merge(sub, random.pick(mix));
+      }
+
+      for (var prop in sub) {
+        if ((Array.isArray(sub[prop]) || typeof sub[prop] === 'object') && !isKey(prop)) {
+          sub[prop] = reduce(sub[prop]);
+        }
+      }
+
+      return sub;
+    });
+  } catch (e) {
+    if (e.path) {
+      throw new Error(e.message + ' in ' + '/' + e.path.join('/'));
+    } else {
+      throw e;
+    }
+  }
+}
+
+generate.formats = formats;
+generate.extend = container.set;
+
+module.exports = generate;
+
+},{"./util/container":938,"./util/formats":940,"./util/merge":943,"./util/random":945,"./util/traverse":946,"deref":1}],931:[function(require,module,exports){
+'use strict';
+
+var random = require('../util/random'),
+    traverse = require('../util/traverse'),
+    hasProps = require('../util/has-props');
+
+var ParseError = require('../util/error');
+
+function unique(path, items, value, sample, resolve) {
+  var tmp = [],
+      seen = [];
+
+  function walk(obj) {
+    var json = JSON.stringify(obj);
+
+    if (seen.indexOf(json) === -1) {
+      seen.push(json);
+      tmp.push(obj);
+    }
+  }
+
+  items.forEach(walk);
+
+  // TODO: find a better solution?
+  var limit = 100;
+
+  while (tmp.length !== items.length) {
+    walk(traverse(value.items || sample, path, resolve));
+
+    if (!limit--) {
+      break;
+    }
+  }
+
+  return tmp;
+}
+
+module.exports = function(value, path, resolve) {
+  var items = [];
+
+  if (!(value.items || value.additionalItems)) {
+    if (hasProps(value, 'minItems', 'maxItems', 'uniqueItems')) {
+      throw new ParseError('missing items for ' + JSON.stringify(value), path);
+    }
+
+    return items;
+  }
+
+  if (Array.isArray(value.items)) {
+    return Array.prototype.concat.apply(items, value.items.map(function(item, key) {
+      return traverse(item, path.concat(['items', key]), resolve);
+    }));
+  }
+
+  var length = random(value.minItems, value.maxItems, 1, 5),
+      sample = typeof value.additionalItems === 'object' ? value.additionalItems : {};
+
+  for (var current = items.length; current < length; current += 1) {
+    items.push(traverse(value.items || sample, path.concat(['items', current]), resolve));
+  }
+
+  if (value.uniqueItems) {
+    return unique(path.concat(['items']), items, value, sample, resolve);
+  }
+
+  return items;
+};
+
+},{"../util/error":939,"../util/has-props":941,"../util/random":945,"../util/traverse":946}],932:[function(require,module,exports){
+'use strict';
+
+module.exports = function() {
+  return Math.random() > 0.5;
+};
+
+},{}],933:[function(require,module,exports){
+'use strict';
+
+var number = require('./number');
+
+// The `integer` type is just a wrapper for the `number` type. The `number` type
+// returns floating point numbers, and `integer` type truncates the fraction
+// part, leaving the result as an integer.
+//
+module.exports = function(value) {
+  value.hasPrecision = false;
+  var generated = number(value);
+  // whether the generated number is positive or negative, need to use either
+  // floor (positive) or ceil (negative) function to get rid of the fraction
+  return generated > 0 ? Math.floor(generated) : Math.ceil(generated);
+};
+
+},{"./number":935}],934:[function(require,module,exports){
+'use strict';
+
+module.exports = function() {
+  return null;
+};
+
+},{}],935:[function(require,module,exports){
+'use strict';
+
+var MIN_INTEGER = -100000000,
+    MAX_INTEGER = 100000000;
+
+var string = require('./string'),
+    random = require('../util/random');
+
+module.exports = function(value) {
+  if (value.faker || value.chance) {
+    return string(value);
+  }
+
+  var min = typeof value.minimum === 'undefined' ? MIN_INTEGER : value.minimum,
+      max = typeof value.maximum === 'undefined' ? MAX_INTEGER : value.maximum;
+
+  if (value.exclusiveMinimum && value.minimum) {
+    min += 1;
+  }
+
+  if (value.exclusiveMaximum && value.maximum) {
+    max -= 1;
+  }
+
+  if (value.multipleOf) {
+    var base = random(Math.floor(min / value.multipleOf), Math.floor(max / value.multipleOf)) * value.multipleOf;
+
+    while (base < min) {
+      base += value.multipleOf;
+    }
+
+    return base;
+  }
+
+  if (value.hasPrecision) {
+    return random(false, min, max);
+  }
+
+  return random(Math.random() > 0.5, min, max);
+};
+
+},{"../util/random":945,"./string":937}],936:[function(require,module,exports){
+'use strict';
+
+var container = require('../util/container'),
+    random = require('../util/random'),
+    traverse = require('../util/traverse'),
+    hasProps = require('../util/has-props');
+
+var faker = container.get('faker'),
+    RandExp = container.get('randexp'),
+    randexp = RandExp.randexp;
+
+var ParseError = require('../util/error');
+
+module.exports = function(value, path, resolve) {
+  var props = {};
+
+  if (!(value.properties || value.patternProperties || value.additionalProperties)) {
+    if (hasProps(value, 'minProperties', 'maxProperties', 'dependencies', 'required')) {
+      throw new ParseError('missing properties for ' + JSON.stringify(value), path);
+    }
+
+    return props;
+  }
+
+  var reqProps = value.required || [],
+      allProps = value.properties ? Object.keys(value.properties) : [];
+
+  reqProps.forEach(function(key) {
+    if (value.properties && value.properties[key]) {
+      props[key] = value.properties[key];
+    }
+  });
+
+  var optProps = allProps.filter(function(prop) {
+    return reqProps.indexOf(prop) === -1;
+  });
+
+  if (value.patternProperties) {
+    optProps = Array.prototype.concat.apply(optProps, Object.keys(value.patternProperties));
+  }
+
+  var length = random(value.minProperties, value.maxProperties, 0, optProps.length);
+
+  random.shuffle(optProps).slice(0, length).forEach(function(key) {
+    if (value.properties && value.properties[key]) {
+      props[key] = value.properties[key];
+    } else {
+      props[randexp(key)] = value.patternProperties[key];
+    }
+  });
+
+  var current = Object.keys(props).length,
+      sample = typeof value.additionalProperties === 'object' ? value.additionalProperties : {};
+
+  if (current < length) {
+    faker.lorem.words(length - current).forEach(function(key) {
+      props[key + randexp('\\w{1,10}')] = sample;
+    });
+  }
+
+  return traverse(props, path.concat(['properties']), resolve);
+};
+
+},{"../util/container":938,"../util/error":939,"../util/has-props":941,"../util/random":945,"../util/traverse":946}],937:[function(require,module,exports){
+'use strict';
+
+var container = require('../util/container');
+
+var faker = container.get('faker'),
+    chance = container.get('chance'),
+    RandExp = container.get('randexp'),
+    randexp = RandExp.randexp;
+
+var random = require('../util/random'),
+    formats = require('../util/formats');
+
+var regexps = {
+  email: '[a-zA-Z\\d][a-zA-Z\\d-]{1,13}[a-zA-Z\\d]@{hostname}',
+  hostname: '[a-zA-Z]{1,33}\\.[a-z]{2,4}',
+  ipv6: '[abcdef\\d]{4}(:[abcdef\\d]{4}){7}',
+  uri: '[a-zA-Z][a-zA-Z0-9+-.]*'
+};
+
+function get(obj, key) {
+  var parts = key.split('.');
+
+  while (parts.length) {
+    var prop = parts.shift();
+
+    if (!obj[prop]) {
+      break;
+    }
+
+    obj = obj[prop];
+  }
+
+  return obj;
+}
+
+function generate(value) {
+  if (value.use) {
+    var args = [],
+        path = value.key;
+
+    if (typeof path === 'object') {
+      path = Object.keys(path)[0];
+
+      if (Array.isArray(value.key[path])) {
+        args = value.key[path];
+      } else {
+        args.push(value.key[path]);
+      }
+    }
+
+    var gen = get(value.gen, path);
+
+    if (typeof gen !== 'function') {
+      throw new Error('unknown ' + value.use + '-generator for ' + JSON.stringify(value.key));
+    }
+
+    return gen.apply(value.gen, args);
+  }
+
+  switch (value.format) {
+    case 'date-time':
+      return new Date(random(0, 100000000000000)).toISOString();
+
+    case 'email':
+    case 'hostname':
+    case 'ipv6':
+    case 'uri':
+      return randexp(regexps[value.format]).replace(/\{(\w+)\}/, function(matches, key) {
+        return randexp(regexps[key]);
+      });
+
+    case 'ipv4':
+      return [0, 0, 0, 0].map(function() {
+        return random(0, 255);
+      }).join('.');
+
+    default:
+      var callback = formats(value.format);
+
+      if (typeof callback !== 'function') {
+        throw new Error('unknown generator for ' + JSON.stringify(value.format));
+      }
+
+      var generators = {
+        faker: faker,
+        chance: chance,
+        randexp: randexp
+      };
+
+      return callback(generators, value);
+  }
+}
+
+module.exports = function(value) {
+  if (value.faker || value.chance) {
+    return generate({
+      use: value.faker ? 'faker' : 'chance',
+      gen: value.faker ? faker : chance,
+      key: value.faker || value.chance
+    });
+  }
+
+  if (value.format) {
+    return generate(value);
+  }
+
+  if (value.pattern) {
+    return randexp(value.pattern);
+  }
+
+  if (value.minLength || value.maxLength) {
+    var min = Math.max(0, value.minLength || 0),
+        max = random(min, value.maxLength);
+
+    return randexp('.{' + min + ',' + max + '}');
+  }
+
+  return faker.lorem.words(random(1, 5)).join(' ');
+};
+
+},{"../util/container":938,"../util/formats":940,"../util/random":945}],938:[function(require,module,exports){
+'use strict';
+
+// static requires - handle both initial dependency load (deps will be available
+// among other modules) as well as they will be included by browserify AST
+var Chance = require('chance');
+
+var container = {
+  faker: require('faker'),
+  chance: new Chance(),
+  randexp: require('randexp')
+};
+
+module.exports = {
+  set: function(name, callback) {
+    if (typeof container[name] === 'undefined') {
+      throw new ReferenceError('"' + name + '" dependency doesn\'t exist.');
+    }
+
+    container[name] = callback(container[name]);
+  },
+  get: function(name) {
+    return container[name];
+  }
+};
+
+},{"chance":8,"faker":9,"randexp":947}],939:[function(require,module,exports){
+'use strict';
+
+function ParseError(message, path) {
+  this.message = message;
+  this.path = path;
+  this.name = 'ParseError';
+}
+
+ParseError.prototype = Error.prototype;
+
+module.exports = ParseError;
+
+},{}],940:[function(require,module,exports){
+'use strict';
+
+var registry = {};
+
+module.exports = function(name, callback) {
+  if (callback) {
+    registry[name] = callback;
+  } else if (typeof name === 'object') {
+    for (var method in name) {
+      registry[method] = name[method];
+    }
+  } else if (name) {
+    return registry[name];
+  }
+
+  return registry;
+};
+
+},{}],941:[function(require,module,exports){
+'use strict';
+
+module.exports = function(obj) {
+  return Array.prototype.slice.call(arguments, 1).filter(function(key) {
+    return typeof obj[key] !== 'undefined';
+  }).length > 0;
+};
+
+},{}],942:[function(require,module,exports){
+'use strict';
+
+var inferredProperties = {
+  array: [
+    'additionalItems',
+    'items',
+    'maxItems',
+    'minItems',
+    'uniqueItems'
+  ],
+  integer: [
+    'exclusiveMaximum',
+    'exclusiveMinimum',
+    'maximum',
+    'minimum',
+    'multipleOf'
+  ],
+  object: [
+    'additionalProperties',
+    'dependencies',
+    'maxProperties',
+    'minProperties',
+    'patternProperties',
+    'properties',
+    'required'
+  ],
+  string: [
+    'maxLength',
+    'menlength',
+    'pattern'
+  ]
+};
+
+var subschemaProperties = [
+  'additionalItems', 'items', 'additionalProperties', 'dependencies', 'patternProperties', 'properties'
+];
+
+inferredProperties.number = inferredProperties.integer;
+
+function mayHaveType(obj, path, props) {
+  return Object.keys(obj).filter(function(prop) {
+    // Do not attempt to infer properties named as subschema containers.  The reason for this is
+    // that any property name within those containers that matches one of the properties used for inferring missing type
+    // values causes the container itself to get processed which leads to invalid output.  (Issue 62)
+    if (props.indexOf(prop) > -1 && subschemaProperties.indexOf(path[path.length - 1]) === -1) {
+      return true;
+    }
+  }).length > 0;
+}
+
+module.exports = function(obj, path) {
+  for (var type in inferredProperties) {
+    if (mayHaveType(obj, path, inferredProperties[type])) {
+      return type;
+    }
+  }
+};
+
+},{}],943:[function(require,module,exports){
+'use strict';
+
+var merge;
+
+function clone(arr) {
+  var out = [];
+
+  arr.forEach(function(item, index) {
+    if (typeof item === 'object' && item !== null) {
+      out[index] = Array.isArray(item) ? clone(item) : merge({}, item);
+    } else {
+      out[index] = item;
+    }
+  });
+
+  return out;
+}
+
+merge = module.exports = function(a, b) {
+  for (var key in b) {
+    if (typeof b[key] !== 'object' || b[key] === null) {
+      a[key] = b[key];
+    } else if (Array.isArray(b[key])) {
+      a[key] = (a[key] || []).concat(clone(b[key]));
+    } else if (typeof a[key] !== 'object' || a[key] === null || Array.isArray(a[key])) {
+      a[key] = merge({}, b[key]);
+    } else {
+      a[key] = merge(a[key], b[key]);
+    }
+  }
+
+  return a;
+};
+
+},{}],944:[function(require,module,exports){
+'use strict';
+
+module.exports = {
+  array: require('../types/array'),
+  boolean: require('../types/boolean'),
+  integer: require('../types/integer'),
+  number: require('../types/number'),
+  null: require('../types/null'),
+  object: require('../types/object'),
+  string: require('../types/string')
+};
+
+},{"../types/array":931,"../types/boolean":932,"../types/integer":933,"../types/null":934,"../types/number":935,"../types/object":936,"../types/string":937}],945:[function(require,module,exports){
+'use strict';
+
+var container = require('./container');
+
+var faker = container.get('faker');
+
+var random = module.exports = function(min, max, defMin, defMax) {
+  var isInteger = true;
+
+  if (typeof min === 'boolean') {
+    // non-integer values
+    isInteger = min;
+    min = arguments[1];
+    max = arguments[2];
+    defMin = arguments[3];
+    defMax = arguments[4];
+  }
+
+  defMin = typeof defMin === 'undefined' ? random.MIN_NUMBER : defMin;
+  defMax = typeof defMax === 'undefined' ? random.MAX_NUMBER : defMax;
+
+  min = typeof min === 'undefined' ? defMin : min;
+  max = typeof max === 'undefined' ? defMax : max;
+
+  if (max < min) {
+    max += min;
+  }
+
+  return faker.random.number({
+    min: min,
+    max: max,
+    precision: isInteger ? 1 : Math.random()
+  });
+};
+
+random.shuffle = function(obj) {
+  var copy = obj.slice(),
+      length = obj.length;
+
+  for (; length > 0;) {
+    var key = Math.floor(Math.random() * length),
+        tmp = copy[--length];
+
+    copy[length] = copy[key];
+    copy[key] = tmp;
+  }
+
+  return copy;
+};
+
+random.pick = function(obj) {
+  return obj[Math.floor(Math.random() * obj.length)];
+};
+
+random.MIN_NUMBER = -100;
+random.MAX_NUMBER = 100;
+
+},{"./container":938}],946:[function(require,module,exports){
+'use strict';
+
+var random = require('./random');
+
+var ParseError = require('./error');
+
+var inferredType = require('./inferred');
+
+var primitives = null;
+
+function traverse(obj, path, resolve) {
+  resolve(obj);
+
+  var copy = {};
+
+  if (Array.isArray(obj)) {
+    copy = [];
+  }
+
+  if (Array.isArray(obj.enum)) {
+    return random.pick(obj.enum);
+  }
+
+  var type = obj.type;
+
+  if (Array.isArray(type)) {
+    type = random.pick(type);
+  } else if (typeof type === 'undefined') {
+    // Attempt to infer the type
+    type = inferredType(obj, path) || type;
+  }
+
+  if (typeof type === 'string') {
+    if (!primitives[type]) {
+      throw new ParseError('unknown primitive ' + JSON.stringify(type), path.concat(['type']));
+    }
+
+    try {
+      return primitives[type](obj, path, resolve);
+    } catch (e) {
+      if (typeof e.path === 'undefined') {
+        throw new ParseError(e.message, path);
+      }
+
+      throw e;
+    }
+  }
+
+  for (var prop in obj) {
+    if (typeof obj[prop] === 'object' && prop !== 'definitions') {
+      copy[prop] = traverse(obj[prop], path.concat([prop]), resolve);
+    } else {
+      copy[prop] = obj[prop];
+    }
+  }
+
+  return copy;
+}
+
+module.exports = function() {
+  primitives = primitives || require('./primitives');
+
+  return traverse.apply(null, arguments);
+};
+
+},{"./error":939,"./inferred":942,"./primitives":944,"./random":945}],947:[function(require,module,exports){
 var ret = require('ret');
 var DRange = require('discontinuous-range');
 var types = ret.types;
@@ -49311,4 +49469,4 @@ $(document).ready(function () {
     });
 });
 
-},{"../schema/array/enum.json":954,"../schema/array/fixed.json":955,"../schema/array/n-times.json":956,"../schema/boolean.json":957,"../schema/chance/chance.json":958,"../schema/faker/faker.json":959,"../schema/integer.json":960,"../schema/reference.json":961,"json-schema-faker":5}]},{},[962]);
+},{"../schema/array/enum.json":954,"../schema/array/fixed.json":955,"../schema/array/n-times.json":956,"../schema/boolean.json":957,"../schema/chance/chance.json":958,"../schema/faker/faker.json":959,"../schema/integer.json":960,"../schema/reference.json":961,"json-schema-faker":930}]},{},[962]);
