@@ -20,6 +20,8 @@ module.exports = (grunt) ->
           watch: on
           browserifyOptions:
             fullPaths: off
+            detectGlobals: off
+            noBuiltins: on
         files:
           'bundle.js': [
             'src/main.js'
