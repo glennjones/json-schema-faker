@@ -55,16 +55,36 @@ $(document).ready(function () {
         ui.input.val(value);
     }
 
+    function fillOutput(value) {
+        ui.output.val(value);
+    }
+
     function generateOutput(){
         var schema = JSON.parse(ui.input.val());
         var sample = jsf(schema);
-        ui.output.val(format(sample));
+        fillOutput(format(sample));
+    }
+
+    function syncOut() {
+      location.hash = encodeURIComponent(JSON.stringify(JSON.parse(ui.input.val())));
+    }
+
+    function syncIn() {
+        try {
+            var schema = JSON.parse(decodeURIComponent(location.hash.substr(1)));
+            fillInput(format(schema))
+            fillOutput(format(jsf(schema)));
+        } catch (e) {}
     }
 
     fillInput(format(schemas.other.boolean));
     generateOutput();
+    syncIn();
 
-    ui.run.on('click', generateOutput);
+    ui.run.on('click', function() {
+      generateOutput();
+      syncOut();
+    });
 
     ui.examples.faker.faker.on('click', function () {
         clearOutput();
