@@ -1,512 +1,4 @@
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
-'use strict';
-
-var $ = require('./util/uri-helpers');
-
-$.findByRef = require('./util/find-reference');
-$.resolveSchema = require('./util/resolve-schema');
-$.normalizeSchema = require('./util/normalize-schema');
-
-var instance = module.exports = function() {
-  function $ref(fakeroot, schema, refs, ex) {
-    if (typeof fakeroot === 'object') {
-      ex = refs;
-      refs = schema;
-      schema = fakeroot;
-      fakeroot = undefined;
-    }
-
-    if (typeof schema !== 'object') {
-      throw new Error('schema must be an object');
-    }
-
-    if (typeof refs !== 'undefined' && !Array.isArray(refs)) {
-      ex = !!refs;
-      refs = [];
-    }
-
-    function push(ref) {
-      if (typeof ref.id === 'string') {
-        var id = $.resolveURL(fakeroot, ref.id).replace(/\/#?$/, '');
-
-        if (id.indexOf('#') > -1) {
-          var parts = id.split('#');
-
-          if (parts[1].charAt() === '/') {
-            id = parts[0];
-          } else {
-            id = parts[1] || parts[0];
-          }
-        }
-
-        if (!$ref.refs[id]) {
-          $ref.refs[id] = ref;
-        }
-      }
-    }
-
-    (refs || []).concat([schema]).forEach(function(ref) {
-      schema = $.normalizeSchema(fakeroot, ref, push);
-      push(schema);
-    });
-
-    return $.resolveSchema(schema, $ref.refs, ex);
-  }
-
-  $ref.refs = {};
-  $ref.util = $;
-
-  return $ref;
-};
-
-instance.util = $;
-
-},{"./util/find-reference":3,"./util/normalize-schema":4,"./util/resolve-schema":5,"./util/uri-helpers":6}],2:[function(require,module,exports){
-'use strict';
-
-var clone = module.exports = function(obj, seen) {
-  seen = seen || [];
-
-  if (seen.indexOf(obj) > -1) {
-    throw new Error('unable dereference circular structures');
-  }
-
-  if (!obj || typeof obj !== 'object') {
-    return obj;
-  }
-
-  seen = seen.concat([obj]);
-
-  var target = Array.isArray(obj) ? [] : {};
-
-  function copy(key, value) {
-    target[key] = clone(value, seen);
-  }
-
-  if (Array.isArray(target)) {
-    obj.forEach(function(value, key) {
-      copy(key, value);
-    });
-  } else if (Object.prototype.toString.call(obj) === '[object Object]') {
-    Object.keys(obj).forEach(function(key) {
-      copy(key, obj[key]);
-    });
-  }
-
-  return target;
-};
-
-},{}],3:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-function get(obj, path) {
-  var hash = path.split('#')[1];
-
-  var parts = hash.split('/').slice(1);
-
-  while (parts.length) {
-    var key = decodeURIComponent(parts.shift()).replace(/~1/g, '/').replace(/~0/g, '~');
-
-    if (typeof obj[key] === 'undefined') {
-      throw new Error('JSON pointer not found: ' + path);
-    }
-
-    obj = obj[key];
-  }
-
-  return obj;
-}
-
-var find = module.exports = function(id, refs) {
-  var target = refs[id] || refs[id.split('#')[1]] || refs[$.getDocumentURI(id)];
-
-  if (target) {
-    target = id.indexOf('#/') > -1 ? get(target, id) : target;
-  } else {
-    for (var key in refs) {
-      if ($.resolveURL(refs[key].id, id) === refs[key].id) {
-        target = refs[key];
-        break;
-      }
-    }
-  }
-
-  if (!target) {
-    throw new Error('Reference not found: ' + id);
-  }
-
-  while (target.$ref) {
-    target = find(target.$ref, refs);
-  }
-
-  return target;
-};
-
-},{"./uri-helpers":6}],4:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-var cloneObj = require('./clone-obj');
-
-var SCHEMA_URI = [
-  'http://json-schema.org/schema#',
-  'http://json-schema.org/draft-04/schema#'
-];
-
-function expand(obj, parent, callback) {
-  if (obj) {
-    var id = typeof obj.id === 'string' ? obj.id : '#';
-
-    if (!$.isURL(id)) {
-      id = $.resolveURL(parent === id ? null : parent, id);
-    }
-
-    if (typeof obj.$ref === 'string' && !$.isURL(obj.$ref)) {
-      obj.$ref = $.resolveURL(id, obj.$ref);
-    }
-
-    if (typeof obj.id === 'string') {
-      obj.id = parent = id;
-    }
-  }
-
-  for (var key in obj) {
-    var value = obj[key];
-
-    if (typeof value === 'object' && !(key === 'enum' || key === 'required')) {
-      expand(value, parent, callback);
-    }
-  }
-
-  if (typeof callback === 'function') {
-    callback(obj);
-  }
-}
-
-module.exports = function(fakeroot, schema, push) {
-  if (typeof fakeroot === 'object') {
-    push = schema;
-    schema = fakeroot;
-    fakeroot = null;
-  }
-
-  var base = fakeroot || '',
-      copy = cloneObj(schema);
-
-  if (copy.$schema && SCHEMA_URI.indexOf(copy.$schema) === -1) {
-    throw new Error('Unsupported schema version (v4 only)');
-  }
-
-  base = $.resolveURL(copy.$schema || SCHEMA_URI[0], base);
-
-  expand(copy, $.resolveURL(copy.id || '#', base), push);
-
-  copy.id = copy.id || base;
-
-  return copy;
-};
-
-},{"./clone-obj":2,"./uri-helpers":6}],5:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-var find = require('./find-reference');
-
-var deepExtend = require('deep-extend');
-
-function isKey(prop) {
-  return prop === 'enum' || prop === 'required' || prop === 'definitions';
-}
-
-function copy(obj, refs, parent, resolve) {
-  var target =  Array.isArray(obj) ? [] : {};
-
-  if (typeof obj.$ref === 'string') {
-    var base = $.getDocumentURI(obj.$ref);
-
-    if (parent !== base || (resolve && obj.$ref.indexOf('#/') > -1)) {
-      var fixed = find(obj.$ref, refs);
-
-      deepExtend(obj, fixed);
-
-      delete obj.$ref;
-      delete obj.id;
-    }
-  }
-
-  for (var prop in obj) {
-    if (typeof obj[prop] === 'object' && !isKey(prop)) {
-      target[prop] = copy(obj[prop], refs, parent, resolve);
-    } else {
-      target[prop] = obj[prop];
-    }
-  }
-
-  return target;
-}
-
-module.exports = function(obj, refs, resolve) {
-  var fixedId = $.resolveURL(obj.$schema, obj.id),
-      parent = $.getDocumentURI(fixedId);
-
-  return copy(obj, refs, parent, resolve);
-};
-
-},{"./find-reference":3,"./uri-helpers":6,"deep-extend":7}],6:[function(require,module,exports){
-'use strict';
-
-// https://gist.github.com/pjt33/efb2f1134bab986113fd
-
-function URLUtils(url, baseURL) {
-  // remove leading ./
-  url = url.replace(/^\.\//, '');
-
-  var m = String(url).replace(/^\s+|\s+$/g, '').match(/^([^:\/?#]+:)?(?:\/\/(?:([^:@]*)(?::([^:@]*))?@)?(([^:\/?#]*)(?::(\d*))?))?([^?#]*)(\?[^#]*)?(#[\s\S]*)?/);
-  if (!m) {
-    throw new RangeError();
-  }
-  var href = m[0] || '';
-  var protocol = m[1] || '';
-  var username = m[2] || '';
-  var password = m[3] || '';
-  var host = m[4] || '';
-  var hostname = m[5] || '';
-  var port = m[6] || '';
-  var pathname = m[7] || '';
-  var search = m[8] || '';
-  var hash = m[9] || '';
-  if (baseURL !== undefined) {
-    var base = new URLUtils(baseURL);
-    var flag = protocol === '' && host === '' && username === '';
-    if (flag && pathname === '' && search === '') {
-      search = base.search;
-    }
-    if (flag && pathname.charAt(0) !== '/') {
-      pathname = (pathname !== '' ? (base.pathname.slice(0, base.pathname.lastIndexOf('/') + 1) + pathname) : base.pathname);
-    }
-    // dot segments removal
-    var output = [];
-
-    pathname.replace(/\/?[^\/]+/g, function(p) {
-      if (p === '/..') {
-        output.pop();
-      } else {
-        output.push(p);
-      }
-    });
-
-    pathname = output.join('') || '/';
-
-    if (flag) {
-      port = base.port;
-      hostname = base.hostname;
-      host = base.host;
-      password = base.password;
-      username = base.username;
-    }
-    if (protocol === '') {
-      protocol = base.protocol;
-    }
-    href = protocol + (host !== '' ? '//' : '') + (username !== '' ? username + (password !== '' ? ':' + password : '') + '@' : '') + host + pathname + search + hash;
-  }
-  this.href = href;
-  this.origin = protocol + (host !== '' ? '//' + host : '');
-  this.protocol = protocol;
-  this.username = username;
-  this.password = password;
-  this.host = host;
-  this.hostname = hostname;
-  this.port = port;
-  this.pathname = pathname;
-  this.search = search;
-  this.hash = hash;
-}
-
-function isURL(path) {
-  if (typeof path === 'string' && /^\w+:\/\//.test(path)) {
-    return true;
-  }
-}
-
-function parseURI(href, base) {
-  return new URLUtils(href, base);
-}
-
-function resolveURL(base, href) {
-  base = base || 'http://json-schema.org/schema#';
-
-  href = parseURI(href, base);
-  base = parseURI(base);
-
-  if (base.hash && !href.hash) {
-    return href.href + base.hash;
-  }
-
-  return href.href;
-}
-
-function getDocumentURI(uri) {
-  return typeof uri === 'string' && uri.split('#')[0];
-}
-
-module.exports = {
-  isURL: isURL,
-  parseURI: parseURI,
-  resolveURL: resolveURL,
-  getDocumentURI: getDocumentURI
-};
-
-},{}],7:[function(require,module,exports){
-/*!
- * @description Recursive object extending
- * @author Viacheslav Lotsmanov <lotsmanov89@gmail.com>
- * @license MIT
- *
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2015 Viacheslav Lotsmanov
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
-
-'use strict';
-
-function isSpecificValue(val) {
-	return (
-		val instanceof Buffer
-		|| val instanceof Date
-		|| val instanceof RegExp
-	) ? true : false;
-}
-
-function cloneSpecificValue(val) {
-	if (val instanceof Buffer) {
-		var x = new Buffer(val.length);
-		val.copy(x);
-		return x;
-	} else if (val instanceof Date) {
-		return new Date(val.getTime());
-	} else if (val instanceof RegExp) {
-		return new RegExp(val);
-	} else {
-		throw new Error('Unexpected situation');
-	}
-}
-
-/**
- * Recursive cloning array.
- */
-function deepCloneArray(arr) {
-	var clone = [];
-	arr.forEach(function (item, index) {
-		if (typeof item === 'object' && item !== null) {
-			if (Array.isArray(item)) {
-				clone[index] = deepCloneArray(item);
-			} else if (isSpecificValue(item)) {
-				clone[index] = cloneSpecificValue(item);
-			} else {
-				clone[index] = deepExtend({}, item);
-			}
-		} else {
-			clone[index] = item;
-		}
-	});
-	return clone;
-}
-
-/**
- * Extening object that entered in first argument.
- *
- * Returns extended object or false if have no target object or incorrect type.
- *
- * If you wish to clone source object (without modify it), just use empty new
- * object as first argument, like this:
- *   deepExtend({}, yourObj_1, [yourObj_N]);
- */
-var deepExtend = module.exports = function (/*obj_1, [obj_2], [obj_N]*/) {
-	if (arguments.length < 1 || typeof arguments[0] !== 'object') {
-		return false;
-	}
-
-	if (arguments.length < 2) {
-		return arguments[0];
-	}
-
-	var target = arguments[0];
-
-	// convert arguments to array and cut off target object
-	var args = Array.prototype.slice.call(arguments, 1);
-
-	var val, src, clone;
-
-	args.forEach(function (obj) {
-		// skip argument if it is array or isn't object
-		if (typeof obj !== 'object' || Array.isArray(obj)) {
-			return;
-		}
-
-		Object.keys(obj).forEach(function (key) {
-			src = target[key]; // source value
-			val = obj[key]; // new value
-
-			// recursion prevention
-			if (val === target) {
-				return;
-
-			/**
-			 * if new value isn't object then just overwrite by new value
-			 * instead of extending.
-			 */
-			} else if (typeof val !== 'object' || val === null) {
-				target[key] = val;
-				return;
-
-			// just clone arrays (and recursive clone objects inside)
-			} else if (Array.isArray(val)) {
-				target[key] = deepCloneArray(val);
-				return;
-
-			// custom cloning and overwrite for specific objects
-			} else if (isSpecificValue(val)) {
-				target[key] = cloneSpecificValue(val);
-				return;
-
-			// overwrite by new value if source isn't object or array
-			} else if (typeof src !== 'object' || src === null || Array.isArray(src)) {
-				target[key] = deepExtend({}, val);
-				return;
-
-			// source value and new value is objects both, extending...
-			} else {
-				target[key] = deepExtend(src, val);
-				return;
-			}
-		});
-	});
-
-	return target;
-}
-
-},{}],8:[function(require,module,exports){
 //  Chance.js 0.8.0
 //  http://chancejs.com
 //  (c) 2013 Victor Quinn
@@ -3100,6 +2592,514 @@ var deepExtend = module.exports = function (/*obj_1, [obj_2], [obj_N]*/) {
         window.chance = new Chance();
     }
 })();
+
+},{}],2:[function(require,module,exports){
+'use strict';
+
+var $ = require('./util/uri-helpers');
+
+$.findByRef = require('./util/find-reference');
+$.resolveSchema = require('./util/resolve-schema');
+$.normalizeSchema = require('./util/normalize-schema');
+
+var instance = module.exports = function() {
+  function $ref(fakeroot, schema, refs, ex) {
+    if (typeof fakeroot === 'object') {
+      ex = refs;
+      refs = schema;
+      schema = fakeroot;
+      fakeroot = undefined;
+    }
+
+    if (typeof schema !== 'object') {
+      throw new Error('schema must be an object');
+    }
+
+    if (typeof refs !== 'undefined' && !Array.isArray(refs)) {
+      ex = !!refs;
+      refs = [];
+    }
+
+    function push(ref) {
+      if (typeof ref.id === 'string') {
+        var id = $.resolveURL(fakeroot, ref.id).replace(/\/#?$/, '');
+
+        if (id.indexOf('#') > -1) {
+          var parts = id.split('#');
+
+          if (parts[1].charAt() === '/') {
+            id = parts[0];
+          } else {
+            id = parts[1] || parts[0];
+          }
+        }
+
+        if (!$ref.refs[id]) {
+          $ref.refs[id] = ref;
+        }
+      }
+    }
+
+    (refs || []).concat([schema]).forEach(function(ref) {
+      schema = $.normalizeSchema(fakeroot, ref, push);
+      push(schema);
+    });
+
+    return $.resolveSchema(schema, $ref.refs, ex);
+  }
+
+  $ref.refs = {};
+  $ref.util = $;
+
+  return $ref;
+};
+
+instance.util = $;
+
+},{"./util/find-reference":4,"./util/normalize-schema":5,"./util/resolve-schema":6,"./util/uri-helpers":7}],3:[function(require,module,exports){
+'use strict';
+
+var clone = module.exports = function(obj, seen) {
+  seen = seen || [];
+
+  if (seen.indexOf(obj) > -1) {
+    throw new Error('unable dereference circular structures');
+  }
+
+  if (!obj || typeof obj !== 'object') {
+    return obj;
+  }
+
+  seen = seen.concat([obj]);
+
+  var target = Array.isArray(obj) ? [] : {};
+
+  function copy(key, value) {
+    target[key] = clone(value, seen);
+  }
+
+  if (Array.isArray(target)) {
+    obj.forEach(function(value, key) {
+      copy(key, value);
+    });
+  } else if (Object.prototype.toString.call(obj) === '[object Object]') {
+    Object.keys(obj).forEach(function(key) {
+      copy(key, obj[key]);
+    });
+  }
+
+  return target;
+};
+
+},{}],4:[function(require,module,exports){
+'use strict';
+
+var $ = require('./uri-helpers');
+
+function get(obj, path) {
+  var hash = path.split('#')[1];
+
+  var parts = hash.split('/').slice(1);
+
+  while (parts.length) {
+    var key = decodeURIComponent(parts.shift()).replace(/~1/g, '/').replace(/~0/g, '~');
+
+    if (typeof obj[key] === 'undefined') {
+      throw new Error('JSON pointer not found: ' + path);
+    }
+
+    obj = obj[key];
+  }
+
+  return obj;
+}
+
+var find = module.exports = function(id, refs) {
+  var target = refs[id] || refs[id.split('#')[1]] || refs[$.getDocumentURI(id)];
+
+  if (target) {
+    target = id.indexOf('#/') > -1 ? get(target, id) : target;
+  } else {
+    for (var key in refs) {
+      if ($.resolveURL(refs[key].id, id) === refs[key].id) {
+        target = refs[key];
+        break;
+      }
+    }
+  }
+
+  if (!target) {
+    throw new Error('Reference not found: ' + id);
+  }
+
+  while (target.$ref) {
+    target = find(target.$ref, refs);
+  }
+
+  return target;
+};
+
+},{"./uri-helpers":7}],5:[function(require,module,exports){
+'use strict';
+
+var $ = require('./uri-helpers');
+
+var cloneObj = require('./clone-obj');
+
+var SCHEMA_URI = [
+  'http://json-schema.org/schema#',
+  'http://json-schema.org/draft-04/schema#'
+];
+
+function expand(obj, parent, callback) {
+  if (obj) {
+    var id = typeof obj.id === 'string' ? obj.id : '#';
+
+    if (!$.isURL(id)) {
+      id = $.resolveURL(parent === id ? null : parent, id);
+    }
+
+    if (typeof obj.$ref === 'string' && !$.isURL(obj.$ref)) {
+      obj.$ref = $.resolveURL(id, obj.$ref);
+    }
+
+    if (typeof obj.id === 'string') {
+      obj.id = parent = id;
+    }
+  }
+
+  for (var key in obj) {
+    var value = obj[key];
+
+    if (typeof value === 'object' && !(key === 'enum' || key === 'required')) {
+      expand(value, parent, callback);
+    }
+  }
+
+  if (typeof callback === 'function') {
+    callback(obj);
+  }
+}
+
+module.exports = function(fakeroot, schema, push) {
+  if (typeof fakeroot === 'object') {
+    push = schema;
+    schema = fakeroot;
+    fakeroot = null;
+  }
+
+  var base = fakeroot || '',
+      copy = cloneObj(schema);
+
+  if (copy.$schema && SCHEMA_URI.indexOf(copy.$schema) === -1) {
+    throw new Error('Unsupported schema version (v4 only)');
+  }
+
+  base = $.resolveURL(copy.$schema || SCHEMA_URI[0], base);
+
+  expand(copy, $.resolveURL(copy.id || '#', base), push);
+
+  copy.id = copy.id || base;
+
+  return copy;
+};
+
+},{"./clone-obj":3,"./uri-helpers":7}],6:[function(require,module,exports){
+'use strict';
+
+var $ = require('./uri-helpers');
+
+var find = require('./find-reference');
+
+var deepExtend = require('deep-extend');
+
+function isKey(prop) {
+  return prop === 'enum' || prop === 'required' || prop === 'definitions';
+}
+
+function copy(obj, refs, parent, resolve) {
+  var target =  Array.isArray(obj) ? [] : {};
+
+  if (typeof obj.$ref === 'string') {
+    var base = $.getDocumentURI(obj.$ref);
+
+    if (parent !== base || (resolve && obj.$ref.indexOf('#/') > -1)) {
+      var fixed = find(obj.$ref, refs);
+
+      deepExtend(obj, fixed);
+
+      delete obj.$ref;
+      delete obj.id;
+    }
+  }
+
+  for (var prop in obj) {
+    if (typeof obj[prop] === 'object' && !isKey(prop)) {
+      target[prop] = copy(obj[prop], refs, parent, resolve);
+    } else {
+      target[prop] = obj[prop];
+    }
+  }
+
+  return target;
+}
+
+module.exports = function(obj, refs, resolve) {
+  var fixedId = $.resolveURL(obj.$schema, obj.id),
+      parent = $.getDocumentURI(fixedId);
+
+  return copy(obj, refs, parent, resolve);
+};
+
+},{"./find-reference":4,"./uri-helpers":7,"deep-extend":8}],7:[function(require,module,exports){
+'use strict';
+
+// https://gist.github.com/pjt33/efb2f1134bab986113fd
+
+function URLUtils(url, baseURL) {
+  // remove leading ./
+  url = url.replace(/^\.\//, '');
+
+  var m = String(url).replace(/^\s+|\s+$/g, '').match(/^([^:\/?#]+:)?(?:\/\/(?:([^:@]*)(?::([^:@]*))?@)?(([^:\/?#]*)(?::(\d*))?))?([^?#]*)(\?[^#]*)?(#[\s\S]*)?/);
+  if (!m) {
+    throw new RangeError();
+  }
+  var href = m[0] || '';
+  var protocol = m[1] || '';
+  var username = m[2] || '';
+  var password = m[3] || '';
+  var host = m[4] || '';
+  var hostname = m[5] || '';
+  var port = m[6] || '';
+  var pathname = m[7] || '';
+  var search = m[8] || '';
+  var hash = m[9] || '';
+  if (baseURL !== undefined) {
+    var base = new URLUtils(baseURL);
+    var flag = protocol === '' && host === '' && username === '';
+    if (flag && pathname === '' && search === '') {
+      search = base.search;
+    }
+    if (flag && pathname.charAt(0) !== '/') {
+      pathname = (pathname !== '' ? (base.pathname.slice(0, base.pathname.lastIndexOf('/') + 1) + pathname) : base.pathname);
+    }
+    // dot segments removal
+    var output = [];
+
+    pathname.replace(/\/?[^\/]+/g, function(p) {
+      if (p === '/..') {
+        output.pop();
+      } else {
+        output.push(p);
+      }
+    });
+
+    pathname = output.join('') || '/';
+
+    if (flag) {
+      port = base.port;
+      hostname = base.hostname;
+      host = base.host;
+      password = base.password;
+      username = base.username;
+    }
+    if (protocol === '') {
+      protocol = base.protocol;
+    }
+    href = protocol + (host !== '' ? '//' : '') + (username !== '' ? username + (password !== '' ? ':' + password : '') + '@' : '') + host + pathname + search + hash;
+  }
+  this.href = href;
+  this.origin = protocol + (host !== '' ? '//' + host : '');
+  this.protocol = protocol;
+  this.username = username;
+  this.password = password;
+  this.host = host;
+  this.hostname = hostname;
+  this.port = port;
+  this.pathname = pathname;
+  this.search = search;
+  this.hash = hash;
+}
+
+function isURL(path) {
+  if (typeof path === 'string' && /^\w+:\/\//.test(path)) {
+    return true;
+  }
+}
+
+function parseURI(href, base) {
+  return new URLUtils(href, base);
+}
+
+function resolveURL(base, href) {
+  base = base || 'http://json-schema.org/schema#';
+
+  href = parseURI(href, base);
+  base = parseURI(base);
+
+  if (base.hash && !href.hash) {
+    return href.href + base.hash;
+  }
+
+  return href.href;
+}
+
+function getDocumentURI(uri) {
+  return typeof uri === 'string' && uri.split('#')[0];
+}
+
+module.exports = {
+  isURL: isURL,
+  parseURI: parseURI,
+  resolveURL: resolveURL,
+  getDocumentURI: getDocumentURI
+};
+
+},{}],8:[function(require,module,exports){
+/*!
+ * @description Recursive object extending
+ * @author Viacheslav Lotsmanov <lotsmanov89@gmail.com>
+ * @license MIT
+ *
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2013-2015 Viacheslav Lotsmanov
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+'use strict';
+
+function isSpecificValue(val) {
+	return (
+		val instanceof Buffer
+		|| val instanceof Date
+		|| val instanceof RegExp
+	) ? true : false;
+}
+
+function cloneSpecificValue(val) {
+	if (val instanceof Buffer) {
+		var x = new Buffer(val.length);
+		val.copy(x);
+		return x;
+	} else if (val instanceof Date) {
+		return new Date(val.getTime());
+	} else if (val instanceof RegExp) {
+		return new RegExp(val);
+	} else {
+		throw new Error('Unexpected situation');
+	}
+}
+
+/**
+ * Recursive cloning array.
+ */
+function deepCloneArray(arr) {
+	var clone = [];
+	arr.forEach(function (item, index) {
+		if (typeof item === 'object' && item !== null) {
+			if (Array.isArray(item)) {
+				clone[index] = deepCloneArray(item);
+			} else if (isSpecificValue(item)) {
+				clone[index] = cloneSpecificValue(item);
+			} else {
+				clone[index] = deepExtend({}, item);
+			}
+		} else {
+			clone[index] = item;
+		}
+	});
+	return clone;
+}
+
+/**
+ * Extening object that entered in first argument.
+ *
+ * Returns extended object or false if have no target object or incorrect type.
+ *
+ * If you wish to clone source object (without modify it), just use empty new
+ * object as first argument, like this:
+ *   deepExtend({}, yourObj_1, [yourObj_N]);
+ */
+var deepExtend = module.exports = function (/*obj_1, [obj_2], [obj_N]*/) {
+	if (arguments.length < 1 || typeof arguments[0] !== 'object') {
+		return false;
+	}
+
+	if (arguments.length < 2) {
+		return arguments[0];
+	}
+
+	var target = arguments[0];
+
+	// convert arguments to array and cut off target object
+	var args = Array.prototype.slice.call(arguments, 1);
+
+	var val, src, clone;
+
+	args.forEach(function (obj) {
+		// skip argument if it is array or isn't object
+		if (typeof obj !== 'object' || Array.isArray(obj)) {
+			return;
+		}
+
+		Object.keys(obj).forEach(function (key) {
+			src = target[key]; // source value
+			val = obj[key]; // new value
+
+			// recursion prevention
+			if (val === target) {
+				return;
+
+			/**
+			 * if new value isn't object then just overwrite by new value
+			 * instead of extending.
+			 */
+			} else if (typeof val !== 'object' || val === null) {
+				target[key] = val;
+				return;
+
+			// just clone arrays (and recursive clone objects inside)
+			} else if (Array.isArray(val)) {
+				target[key] = deepCloneArray(val);
+				return;
+
+			// custom cloning and overwrite for specific objects
+			} else if (isSpecificValue(val)) {
+				target[key] = cloneSpecificValue(val);
+				return;
+
+			// overwrite by new value if source isn't object or array
+			} else if (typeof src !== 'object' || src === null || Array.isArray(src)) {
+				target[key] = deepExtend({}, val);
+				return;
+
+			// source value and new value is objects both, extending...
+			} else {
+				target[key] = deepExtend(src, val);
+				return;
+			}
+		});
+	});
+
+	return target;
+}
 
 },{}],9:[function(require,module,exports){
 // since we are requiring the top level of faker, load all locales by default
@@ -45857,33 +45857,35 @@ function generate(schema, refs, ex) {
         return sub;
       }
 
-      if (sub.$ref) {
+      if (typeof sub.$ref === 'string') {
         var id = sub.$ref;
 
         delete sub.$ref;
 
         max--;
 
-        merge(sub, reduce($.util.findByRef(id, $.refs)));
+        merge(sub, $.util.findByRef(id, $.refs));
       }
 
-      if (sub.allOf) {
+      if (Array.isArray(sub.allOf)) {
         var schemas = sub.allOf;
 
         delete sub.allOf;
 
+        // this is the only case where all sub-schemas
+        // must be resolved before any merge
         schemas.forEach(function(s) {
           merge(sub, reduce(s));
         });
       }
 
-      if (sub.oneOf || sub.anyOf) {
+      if (Array.isArray(sub.oneOf || sub.anyOf)) {
         var mix = sub.oneOf || sub.anyOf;
 
         delete sub.anyOf;
         delete sub.oneOf;
 
-        merge(sub, reduce(random.pick(mix)));
+        merge(sub, random.pick(mix));
       }
 
       for (var prop in sub) {
@@ -45908,7 +45910,7 @@ generate.extend = container.set;
 
 module.exports = generate;
 
-},{"./util/container":934,"./util/formats":936,"./util/merge":939,"./util/random":941,"./util/traverse":942,"deref":1}],927:[function(require,module,exports){
+},{"./util/container":934,"./util/formats":936,"./util/merge":939,"./util/random":941,"./util/traverse":942,"deref":2}],927:[function(require,module,exports){
 'use strict';
 
 var random = require('../util/random'),
@@ -46261,7 +46263,7 @@ module.exports = {
   }
 };
 
-},{"chance":8,"faker":9,"randexp":943}],935:[function(require,module,exports){
+},{"chance":1,"faker":9,"randexp":943}],935:[function(require,module,exports){
 'use strict';
 
 function ParseError(message, path) {
