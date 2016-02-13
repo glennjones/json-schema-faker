@@ -1,523 +1,4 @@
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
-/*!
- * @description Recursive object extending
- * @author Viacheslav Lotsmanov <lotsmanov89@gmail.com>
- * @license MIT
- *
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2015 Viacheslav Lotsmanov
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
-
-'use strict';
-
-function isSpecificValue(val) {
-	return (
-		val instanceof Buffer
-		|| val instanceof Date
-		|| val instanceof RegExp
-	) ? true : false;
-}
-
-function cloneSpecificValue(val) {
-	if (val instanceof Buffer) {
-		var x = new Buffer(val.length);
-		val.copy(x);
-		return x;
-	} else if (val instanceof Date) {
-		return new Date(val.getTime());
-	} else if (val instanceof RegExp) {
-		return new RegExp(val);
-	} else {
-		throw new Error('Unexpected situation');
-	}
-}
-
-/**
- * Recursive cloning array.
- */
-function deepCloneArray(arr) {
-	var clone = [];
-	arr.forEach(function (item, index) {
-		if (typeof item === 'object' && item !== null) {
-			if (Array.isArray(item)) {
-				clone[index] = deepCloneArray(item);
-			} else if (isSpecificValue(item)) {
-				clone[index] = cloneSpecificValue(item);
-			} else {
-				clone[index] = deepExtend({}, item);
-			}
-		} else {
-			clone[index] = item;
-		}
-	});
-	return clone;
-}
-
-/**
- * Extening object that entered in first argument.
- *
- * Returns extended object or false if have no target object or incorrect type.
- *
- * If you wish to clone source object (without modify it), just use empty new
- * object as first argument, like this:
- *   deepExtend({}, yourObj_1, [yourObj_N]);
- */
-var deepExtend = module.exports = function (/*obj_1, [obj_2], [obj_N]*/) {
-	if (arguments.length < 1 || typeof arguments[0] !== 'object') {
-		return false;
-	}
-
-	if (arguments.length < 2) {
-		return arguments[0];
-	}
-
-	var target = arguments[0];
-
-	// convert arguments to array and cut off target object
-	var args = Array.prototype.slice.call(arguments, 1);
-
-	var val, src, clone;
-
-	args.forEach(function (obj) {
-		// skip argument if it is array or isn't object
-		if (typeof obj !== 'object' || Array.isArray(obj)) {
-			return;
-		}
-
-		Object.keys(obj).forEach(function (key) {
-			src = target[key]; // source value
-			val = obj[key]; // new value
-
-			// recursion prevention
-			if (val === target) {
-				return;
-
-			/**
-			 * if new value isn't object then just overwrite by new value
-			 * instead of extending.
-			 */
-			} else if (typeof val !== 'object' || val === null) {
-				target[key] = val;
-				return;
-
-			// just clone arrays (and recursive clone objects inside)
-			} else if (Array.isArray(val)) {
-				target[key] = deepCloneArray(val);
-				return;
-
-			// custom cloning and overwrite for specific objects
-			} else if (isSpecificValue(val)) {
-				target[key] = cloneSpecificValue(val);
-				return;
-
-			// overwrite by new value if source isn't object or array
-			} else if (typeof src !== 'object' || src === null || Array.isArray(src)) {
-				target[key] = deepExtend({}, val);
-				return;
-
-			// source value and new value is objects both, extending...
-			} else {
-				target[key] = deepExtend(src, val);
-				return;
-			}
-		});
-	});
-
-	return target;
-}
-
-},{}],2:[function(require,module,exports){
-'use strict';
-
-var $ = require('./util/uri-helpers');
-
-$.findByRef = require('./util/find-reference');
-$.resolveSchema = require('./util/resolve-schema');
-$.normalizeSchema = require('./util/normalize-schema');
-
-var instance = module.exports = function() {
-  function $ref(fakeroot, schema, refs, ex) {
-    if (typeof fakeroot === 'object') {
-      ex = refs;
-      refs = schema;
-      schema = fakeroot;
-      fakeroot = undefined;
-    }
-
-    if (typeof schema !== 'object') {
-      throw new Error('schema must be an object');
-    }
-
-    if (typeof refs === 'object' && refs !== null) {
-      var aux = refs;
-
-      refs = [];
-
-      for (var k in aux) {
-        aux[k].id = aux[k].id || k;
-        refs.push(aux[k]);
-      }
-    }
-
-    if (typeof refs !== 'undefined' && !Array.isArray(refs)) {
-      ex = !!refs;
-      refs = [];
-    }
-
-    function push(ref) {
-      if (typeof ref.id === 'string') {
-        var id = $.resolveURL(fakeroot, ref.id).replace(/\/#?$/, '');
-
-        if (id.indexOf('#') > -1) {
-          var parts = id.split('#');
-
-          if (parts[1].charAt() === '/') {
-            id = parts[0];
-          } else {
-            id = parts[1] || parts[0];
-          }
-        }
-
-        if (!$ref.refs[id]) {
-          $ref.refs[id] = ref;
-        }
-      }
-    }
-
-    (refs || []).concat([schema]).forEach(function(ref) {
-      schema = $.normalizeSchema(fakeroot, ref, push);
-      push(schema);
-    });
-
-    return $.resolveSchema(schema, $ref.refs, ex);
-  }
-
-  $ref.refs = {};
-  $ref.util = $;
-
-  return $ref;
-};
-
-instance.util = $;
-
-},{"./util/find-reference":4,"./util/normalize-schema":5,"./util/resolve-schema":6,"./util/uri-helpers":7}],3:[function(require,module,exports){
-'use strict';
-
-var clone = module.exports = function(obj, seen) {
-  seen = seen || [];
-
-  if (seen.indexOf(obj) > -1) {
-    throw new Error('unable dereference circular structures');
-  }
-
-  if (!obj || typeof obj !== 'object') {
-    return obj;
-  }
-
-  seen = seen.concat([obj]);
-
-  var target = Array.isArray(obj) ? [] : {};
-
-  function copy(key, value) {
-    target[key] = clone(value, seen);
-  }
-
-  if (Array.isArray(target)) {
-    obj.forEach(function(value, key) {
-      copy(key, value);
-    });
-  } else if (Object.prototype.toString.call(obj) === '[object Object]') {
-    Object.keys(obj).forEach(function(key) {
-      copy(key, obj[key]);
-    });
-  }
-
-  return target;
-};
-
-},{}],4:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-function get(obj, path) {
-  var hash = path.split('#')[1];
-
-  var parts = hash.split('/').slice(1);
-
-  while (parts.length) {
-    var key = decodeURIComponent(parts.shift()).replace(/~1/g, '/').replace(/~0/g, '~');
-
-    if (typeof obj[key] === 'undefined') {
-      throw new Error('JSON pointer not found: ' + path);
-    }
-
-    obj = obj[key];
-  }
-
-  return obj;
-}
-
-var find = module.exports = function(id, refs) {
-  var target = refs[id] || refs[id.split('#')[1]] || refs[$.getDocumentURI(id)];
-
-  if (target) {
-    target = id.indexOf('#/') > -1 ? get(target, id) : target;
-  } else {
-    for (var key in refs) {
-      if ($.resolveURL(refs[key].id, id) === refs[key].id) {
-        target = refs[key];
-        break;
-      }
-    }
-  }
-
-  if (!target) {
-    throw new Error('Reference not found: ' + id);
-  }
-
-  while (target.$ref) {
-    target = find(target.$ref, refs);
-  }
-
-  return target;
-};
-
-},{"./uri-helpers":7}],5:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-var cloneObj = require('./clone-obj');
-
-var SCHEMA_URI = [
-  'http://json-schema.org/schema#',
-  'http://json-schema.org/draft-04/schema#'
-];
-
-function expand(obj, parent, callback) {
-  if (obj) {
-    var id = typeof obj.id === 'string' ? obj.id : '#';
-
-    if (!$.isURL(id)) {
-      id = $.resolveURL(parent === id ? null : parent, id);
-    }
-
-    if (typeof obj.$ref === 'string' && !$.isURL(obj.$ref)) {
-      obj.$ref = $.resolveURL(id, obj.$ref);
-    }
-
-    if (typeof obj.id === 'string') {
-      obj.id = parent = id;
-    }
-  }
-
-  for (var key in obj) {
-    var value = obj[key];
-
-    if (typeof value === 'object' && !(key === 'enum' || key === 'required')) {
-      expand(value, parent, callback);
-    }
-  }
-
-  if (typeof callback === 'function') {
-    callback(obj);
-  }
-}
-
-module.exports = function(fakeroot, schema, push) {
-  if (typeof fakeroot === 'object') {
-    push = schema;
-    schema = fakeroot;
-    fakeroot = null;
-  }
-
-  var base = fakeroot || '',
-      copy = cloneObj(schema);
-
-  if (copy.$schema && SCHEMA_URI.indexOf(copy.$schema) === -1) {
-    throw new Error('Unsupported schema version (v4 only)');
-  }
-
-  base = $.resolveURL(copy.$schema || SCHEMA_URI[0], base);
-
-  expand(copy, $.resolveURL(copy.id || '#', base), push);
-
-  copy.id = copy.id || base;
-
-  return copy;
-};
-
-},{"./clone-obj":3,"./uri-helpers":7}],6:[function(require,module,exports){
-'use strict';
-
-var $ = require('./uri-helpers');
-
-var find = require('./find-reference');
-
-var deepExtend = require('deep-extend');
-
-function isKey(prop) {
-  return prop === 'enum' || prop === 'required' || prop === 'definitions';
-}
-
-function copy(obj, refs, parent, resolve) {
-  var target =  Array.isArray(obj) ? [] : {};
-
-  if (typeof obj.$ref === 'string') {
-    var base = $.getDocumentURI(obj.$ref);
-
-    if (parent !== base || (resolve && obj.$ref.indexOf('#/') > -1)) {
-      var fixed = find(obj.$ref, refs);
-
-      deepExtend(obj, fixed);
-
-      delete obj.$ref;
-      delete obj.id;
-    }
-  }
-
-  for (var prop in obj) {
-    if (typeof obj[prop] === 'object' && !isKey(prop)) {
-      target[prop] = copy(obj[prop], refs, parent, resolve);
-    } else {
-      target[prop] = obj[prop];
-    }
-  }
-
-  return target;
-}
-
-module.exports = function(obj, refs, resolve) {
-  var fixedId = $.resolveURL(obj.$schema, obj.id),
-      parent = $.getDocumentURI(fixedId);
-
-  return copy(obj, refs, parent, resolve);
-};
-
-},{"./find-reference":4,"./uri-helpers":7,"deep-extend":1}],7:[function(require,module,exports){
-'use strict';
-
-// https://gist.github.com/pjt33/efb2f1134bab986113fd
-
-function URLUtils(url, baseURL) {
-  // remove leading ./
-  url = url.replace(/^\.\//, '');
-
-  var m = String(url).replace(/^\s+|\s+$/g, '').match(/^([^:\/?#]+:)?(?:\/\/(?:([^:@]*)(?::([^:@]*))?@)?(([^:\/?#]*)(?::(\d*))?))?([^?#]*)(\?[^#]*)?(#[\s\S]*)?/);
-  if (!m) {
-    throw new RangeError();
-  }
-  var href = m[0] || '';
-  var protocol = m[1] || '';
-  var username = m[2] || '';
-  var password = m[3] || '';
-  var host = m[4] || '';
-  var hostname = m[5] || '';
-  var port = m[6] || '';
-  var pathname = m[7] || '';
-  var search = m[8] || '';
-  var hash = m[9] || '';
-  if (baseURL !== undefined) {
-    var base = new URLUtils(baseURL);
-    var flag = protocol === '' && host === '' && username === '';
-    if (flag && pathname === '' && search === '') {
-      search = base.search;
-    }
-    if (flag && pathname.charAt(0) !== '/') {
-      pathname = (pathname !== '' ? (base.pathname.slice(0, base.pathname.lastIndexOf('/') + 1) + pathname) : base.pathname);
-    }
-    // dot segments removal
-    var output = [];
-
-    pathname.replace(/\/?[^\/]+/g, function(p) {
-      if (p === '/..') {
-        output.pop();
-      } else {
-        output.push(p);
-      }
-    });
-
-    pathname = output.join('') || '/';
-
-    if (flag) {
-      port = base.port;
-      hostname = base.hostname;
-      host = base.host;
-      password = base.password;
-      username = base.username;
-    }
-    if (protocol === '') {
-      protocol = base.protocol;
-    }
-    href = protocol + (host !== '' ? '//' : '') + (username !== '' ? username + (password !== '' ? ':' + password : '') + '@' : '') + host + pathname + search + hash;
-  }
-  this.href = href;
-  this.origin = protocol + (host !== '' ? '//' + host : '');
-  this.protocol = protocol;
-  this.username = username;
-  this.password = password;
-  this.host = host;
-  this.hostname = hostname;
-  this.port = port;
-  this.pathname = pathname;
-  this.search = search;
-  this.hash = hash;
-}
-
-function isURL(path) {
-  if (typeof path === 'string' && /^\w+:\/\//.test(path)) {
-    return true;
-  }
-}
-
-function parseURI(href, base) {
-  return new URLUtils(href, base);
-}
-
-function resolveURL(base, href) {
-  base = base || 'http://json-schema.org/schema#';
-
-  href = parseURI(href, base);
-  base = parseURI(base);
-
-  if (base.hash && !href.hash) {
-    return href.href + base.hash;
-  }
-
-  return href.href;
-}
-
-function getDocumentURI(uri) {
-  return typeof uri === 'string' && uri.split('#')[0];
-}
-
-module.exports = {
-  isURL: isURL,
-  parseURI: parseURI,
-  resolveURL: resolveURL,
-  getDocumentURI: getDocumentURI
-};
-
-},{}],8:[function(require,module,exports){
 module.exports = require('./lib/jsf')
   .extend('chance', function() {
     try {
@@ -534,7 +15,7 @@ module.exports = require('./lib/jsf')
     }
   });
 
-},{"./lib/jsf":9,"chance":27,"faker":28}],9:[function(require,module,exports){
+},{"./lib/jsf":2,"chance":20,"faker":28}],2:[function(require,module,exports){
 var container = require('./util/container'),
     traverse = require('./util/traverse'),
     formats = require('./util/formats'),
@@ -625,7 +106,7 @@ generate.extend = function(name, cb) {
 
 module.exports = generate;
 
-},{"./util/container":17,"./util/formats":19,"./util/merge":22,"./util/random":24,"./util/traverse":25,"deref":2}],10:[function(require,module,exports){
+},{"./util/container":10,"./util/formats":12,"./util/merge":15,"./util/random":17,"./util/traverse":18,"deref":21}],3:[function(require,module,exports){
 var random = require('../util/random'),
     traverse = require('../util/traverse'),
     hasProps = require('../util/has-props');
@@ -692,12 +173,12 @@ module.exports = function(value, path, resolve) {
   return items;
 };
 
-},{"../util/error":18,"../util/has-props":20,"../util/random":24,"../util/traverse":25}],11:[function(require,module,exports){
+},{"../util/error":11,"../util/has-props":13,"../util/random":17,"../util/traverse":18}],4:[function(require,module,exports){
 module.exports = function() {
   return Math.random() > 0.5;
 };
 
-},{}],12:[function(require,module,exports){
+},{}],5:[function(require,module,exports){
 var number = require('./number');
 
 // The `integer` type is just a wrapper for the `number` type. The `number` type
@@ -711,12 +192,12 @@ module.exports = function(value) {
   return generated > 0 ? Math.floor(generated) : Math.ceil(generated);
 };
 
-},{"./number":14}],13:[function(require,module,exports){
+},{"./number":7}],6:[function(require,module,exports){
 module.exports = function() {
   return null;
 };
 
-},{}],14:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 var MIN_INTEGER = -100000000,
     MAX_INTEGER = 100000000;
 
@@ -761,7 +242,7 @@ module.exports = function(value) {
   });
 };
 
-},{"../util/random":24,"./string":16}],15:[function(require,module,exports){
+},{"../util/random":17,"./string":9}],8:[function(require,module,exports){
 var container = require('../util/container'),
     random = require('../util/random'),
     words = require('../util/words'),
@@ -823,7 +304,7 @@ module.exports = function(value, path, resolve) {
   return traverse(props, path.concat(['properties']), resolve);
 };
 
-},{"../util/container":17,"../util/error":18,"../util/has-props":20,"../util/random":24,"../util/traverse":25,"../util/words":26}],16:[function(require,module,exports){
+},{"../util/container":10,"../util/error":11,"../util/has-props":13,"../util/random":17,"../util/traverse":18,"../util/words":19}],9:[function(require,module,exports){
 var container = require('../util/container');
 
 var faker = container.get('faker'),
@@ -957,7 +438,7 @@ module.exports = function(value) {
   return sample;
 };
 
-},{"../util/container":17,"../util/formats":19,"../util/random":24,"../util/words":26}],17:[function(require,module,exports){
+},{"../util/container":10,"../util/formats":12,"../util/random":17,"../util/words":19}],10:[function(require,module,exports){
 // static requires - handle both initial dependency load (deps will be available
 // among other modules) as well as they will be included by browserify AST
 var container = {
@@ -985,7 +466,7 @@ module.exports = {
   }
 };
 
-},{"randexp":945}],18:[function(require,module,exports){
+},{"randexp":945}],11:[function(require,module,exports){
 function ParseError(message, path) {
   this.message = message;
   this.path = path;
@@ -996,7 +477,7 @@ ParseError.prototype = Error.prototype;
 
 module.exports = ParseError;
 
-},{}],19:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 var registry = {};
 
 module.exports = function(name, callback) {
@@ -1013,14 +494,14 @@ module.exports = function(name, callback) {
   return registry;
 };
 
-},{}],20:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 module.exports = function(obj) {
   return Array.prototype.slice.call(arguments, 1).filter(function(key) {
     return typeof obj[key] !== 'undefined';
   }).length > 0;
 };
 
-},{}],21:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 var inferredProperties = {
   array: [
     'additionalItems',
@@ -1077,7 +558,7 @@ module.exports = function(obj, path) {
   }
 };
 
-},{}],22:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 var merge;
 
 function clone(arr) {
@@ -1110,7 +591,7 @@ merge = module.exports = function(a, b) {
   return a;
 };
 
-},{}],23:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 module.exports = {
   array: require('../types/array'),
   boolean: require('../types/boolean'),
@@ -1121,7 +602,7 @@ module.exports = {
   string: require('../types/string')
 };
 
-},{"../types/array":10,"../types/boolean":11,"../types/integer":12,"../types/null":13,"../types/number":14,"../types/object":15,"../types/string":16}],24:[function(require,module,exports){
+},{"../types/array":3,"../types/boolean":4,"../types/integer":5,"../types/null":6,"../types/number":7,"../types/object":8,"../types/string":9}],17:[function(require,module,exports){
 var random = module.exports = function(min, max, defMin, defMax) {
   var hasPrecision = false;
 
@@ -1174,7 +655,7 @@ random.pick = function(obj) {
 random.MIN_NUMBER = -100;
 random.MAX_NUMBER = 100;
 
-},{}],25:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 var random = require('./random');
 
 var ParseError = require('./error');
@@ -1238,7 +719,7 @@ module.exports = function() {
   return traverse.apply(null, arguments);
 };
 
-},{"./error":18,"./inferred":21,"./primitives":23,"./random":24}],26:[function(require,module,exports){
+},{"./error":11,"./inferred":14,"./primitives":16,"./random":17}],19:[function(require,module,exports){
 var random = require('./random');
 
 var LIPSUM_WORDS = ('Lorem ipsum dolor sit amet consectetur adipisicing elit sed do eiusmod tempor incididunt ut labore'
@@ -1254,8 +735,8 @@ module.exports = function(min, max) {
   return words.slice(0, length);
 };
 
-},{"./random":24}],27:[function(require,module,exports){
-//  Chance.js 0.8.0
+},{"./random":17}],20:[function(require,module,exports){
+//  Chance.js 1.0.0
 //  http://chancejs.com
 //  (c) 2013 Victor Quinn
 //  Chance may be freely distributed or modified under the MIT license.
@@ -1319,7 +800,7 @@ module.exports = function(min, max) {
         return this;
     }
 
-    Chance.prototype.VERSION = "0.8.0";
+    Chance.prototype.VERSION = "1.0.0";
 
     // Random helper functions
     function initOptions(options, defaults) {
@@ -1624,12 +1105,39 @@ module.exports = function(min, max) {
         return number.length >= width ? number : new Array(width - number.length + 1).join(pad) + number;
     };
 
+    // DEPRECATED on 2015-10-01
     Chance.prototype.pick = function (arr, count) {
         if (arr.length === 0) {
             throw new RangeError("Chance: Cannot pick() from an empty array");
         }
         if (!count || count === 1) {
             return arr[this.natural({max: arr.length - 1})];
+        } else {
+            return this.shuffle(arr).slice(0, count);
+        }
+    };
+
+    // Given an array, returns a single random element
+    Chance.prototype.pickone = function (arr) {
+        if (arr.length === 0) {
+          throw new RangeError("Chance: Cannot pickone() from an empty array");
+        }
+        return arr[this.natural({max: arr.length - 1})];
+    };
+
+    // Given an array, returns a random set with 'count' elements
+    Chance.prototype.pickset = function (arr, count) {
+        if (count === 0) {
+            return [];
+        }
+        if (arr.length === 0) {
+            throw new RangeError("Chance: Cannot pickset() from an empty array");
+        }
+        if (count < 0) {
+            throw new RangeError("Chance: count must be positive number");
+        }
+        if (!count || count === 1) {
+            return [ this.pickone(arr) ];
         } else {
             return this.shuffle(arr).slice(0, count);
         }
@@ -1771,6 +1279,10 @@ module.exports = function(min, max) {
             text += chr;
         }
 
+        if (options.capitalize) {
+            text = this.capitalize(text);
+        }
+
         return text;
     };
 
@@ -1797,6 +1309,11 @@ module.exports = function(min, max) {
                 text += this.syllable();
             }
         }
+
+        if (options.capitalize) {
+            text = this.capitalize(text);
+        }
+
         return text;
     };
 
@@ -1857,16 +1374,17 @@ module.exports = function(min, max) {
     };
 
     Chance.prototype.first = function (options) {
-        options = initOptions(options, {gender: this.gender()});
-        return this.pick(this.get("firstNames")[options.gender.toLowerCase()]);
+        options = initOptions(options, {gender: this.gender(), nationality: 'en'});
+        return this.pick(this.get("firstNames")[options.gender.toLowerCase()][options.nationality.toLowerCase()]);
     };
 
     Chance.prototype.gender = function () {
         return this.pick(['Male', 'Female']);
     };
 
-    Chance.prototype.last = function () {
-        return this.pick(this.get("lastNames"));
+    Chance.prototype.last = function (options) {
+        options = initOptions(options, {nationality: 'en'});
+        return this.pick(this.get("lastNames")[options.nationality.toLowerCase()]);
     };
     
     Chance.prototype.israelId=function(){
@@ -1961,7 +1479,7 @@ module.exports = function(min, max) {
         options = initOptions(options);
 
         var first = this.first(options),
-            last = this.last(),
+            last = this.last(options),
             name;
 
         if (options.middle) {
@@ -1984,6 +1502,7 @@ module.exports = function(min, max) {
     };
 
     // Return the list of available name prefixes based on supplied gender.
+    // @todo introduce internationalization
     Chance.prototype.name_prefixes = function (gender) {
         gender = gender || "all";
         gender = gender.toLowerCase();
@@ -2033,6 +1552,7 @@ module.exports = function(min, max) {
     };
 
     // Return the list of available name suffixes
+    // @todo introduce internationalization
     Chance.prototype.name_suffixes = function () {
         var suffixes = [
             { name: 'Doctor of Osteopathic Medicine', abbreviation: 'D.O.' },
@@ -2177,13 +1697,66 @@ module.exports = function(min, max) {
         return url;
     };
 
+    /**
+     * #Description:
+     * ===============================================
+     * Generate random color value base on color type:
+     * -> hex
+     * -> rgb
+     * -> rgba
+     * -> 0x
+     * -> named color
+     *
+     * #Examples: 
+     * ===============================================
+     * * Geerate random hex color
+     * chance.color() => '#79c157' / 'rgb(110,52,164)' / '0x67ae0b' / '#e2e2e2' / '#29CFA7'
+     * 
+     * * Generate Hex based color value
+     * chance.color({format: 'hex'})    => '#d67118'
+     *
+     * * Generate simple rgb value
+     * chance.color({format: 'rgb'})    => 'rgb(110,52,164)'
+     *
+     * * Generate Ox based color value
+     * chance.color({format: '0x'})     => '0x67ae0b' 
+     *
+     * * Generate graiscale based value
+     * chance.color({grayscale: true})  => '#e2e2e2'
+     *
+     * * Return valide color name
+     * chance.color({format: 'name'})   => 'red'
+     * 
+     * * Make color uppercase
+     * chance.color({casing: 'upper'})  => '#29CFA7'
+     *
+     * @param  [object] options
+     * @return [string] color value
+     */
     Chance.prototype.color = function (options) {
+
         function gray(value, delimiter) {
             return [value, value, value].join(delimiter || '');
         }
 
+        function rgb(hasAlpha) {
+
+            var rgbValue    = (hasAlpha)    ? 'rgba' : 'rgb'; 
+            var alphaChanal = (hasAlpha)    ? (',' + this.floating({min:0, max:1})) : "";
+            var colorValue  = (isGrayscale) ? (gray(this.natural({max: 255}), ',')) : (this.natural({max: 255}) + ',' + this.natural({max: 255}) + ',' + this.natural({max: 255}));
+
+            return rgbValue + '(' + colorValue + alphaChanal + ')';
+        }
+
+        function hex(start, end, withHash) {
+
+            var simbol = (withHash) ? "#" : "";
+            var expression  = (isGrayscale ? gray(this.hash({length: start})) : this.hash({length: end})); 
+            return simbol + expression;
+        }
+
         options = initOptions(options, {
-            format: this.pick(['hex', 'shorthex', 'rgb', 'rgba', '0x']),
+            format: this.pick(['hex', 'shorthex', 'rgb', 'rgba', '0x', 'name']),
             grayscale: false,
             casing: 'lower'
         });
@@ -2192,27 +1765,25 @@ module.exports = function(min, max) {
         var colorValue;
 
         if (options.format === 'hex') {
-            colorValue = '#' + (isGrayscale ? gray(this.hash({length: 2})) : this.hash({length: 6}));
-
-        } else if (options.format === 'shorthex') {
-            colorValue = '#' + (isGrayscale ? gray(this.hash({length: 1})) : this.hash({length: 3}));
-
-        } else if (options.format === 'rgb') {
-            if (isGrayscale) {
-                colorValue = 'rgb(' + gray(this.natural({max: 255}), ',') + ')';
-            } else {
-                colorValue = 'rgb(' + this.natural({max: 255}) + ',' + this.natural({max: 255}) + ',' + this.natural({max: 255}) + ')';
-            }
-        } else if (options.format === 'rgba') {
-            if (isGrayscale) {
-                colorValue = 'rgba(' + gray(this.natural({max: 255}), ',') + ',' + this.floating({min:0, max:1}) + ')';
-            } else {
-                colorValue = 'rgba(' + this.natural({max: 255}) + ',' + this.natural({max: 255}) + ',' + this.natural({max: 255}) + ',' + this.floating({min:0, max:1}) + ')';
-            }
-        } else if (options.format === '0x') {
-            colorValue = '0x' + (isGrayscale ? gray(this.hash({length: 2})) : this.hash({length: 6}));
-        } else {
-            throw new RangeError('Invalid format provided. Please provide one of "hex", "shorthex", "rgb", "rgba", or "0x".');
+            colorValue =  hex.call(this, 2, 6, true);
+        }
+        else if (options.format === 'shorthex') {
+            colorValue = hex.call(this, 1, 3, true);
+        } 
+        else if (options.format === 'rgb') {
+            colorValue = rgb.call(this, false);
+        } 
+        else if (options.format === 'rgba') {
+            colorValue = rgb.call(this, true);
+        } 
+        else if (options.format === '0x') {
+            colorValue = '0x' + hex.call(this, 2, 6);
+        } 
+        else if(options.format === 'name') {
+            return this.pick(this.get("colorNames"));
+        }
+        else {
+            throw new RangeError('Invalid format provided. Please provide one of "hex", "shorthex", "rgb", "rgba", "0x" or "name".');
         }
 
         if (options.casing === 'upper' ) {
@@ -2264,6 +1835,21 @@ module.exports = function(min, max) {
 
     Chance.prototype.klout = function () {
         return this.natural({min: 1, max: 99});
+    };
+
+    Chance.prototype.semver = function (options) {
+        options = initOptions(options, { include_prerelease: true });
+
+        var range = this.pickone(["^", "~", "<", ">", "<=", ">=", "="]);
+        if (options.range) {
+            range = options.range;
+        }
+
+        var prerelease = "";
+        if (options.include_prerelease) {
+            prerelease = this.weighted(["", "-dev", "-beta", "-alpha"], [50, 10, 5, 1]);
+        }
+        return range + this.rpg('3d10').join('.') + prerelease;
     };
 
     Chance.prototype.tlds = function () {
@@ -2585,10 +2171,13 @@ module.exports = function(min, max) {
     };
 
     Chance.prototype.hour = function (options) {
-        options = initOptions(options, {min: 1, max: options && options.twentyfour ? 24 : 12});
+        options = initOptions(options, {
+            min: options && options.twentyfour ? 0 : 1,
+            max: options && options.twentyfour ? 23 : 12
+        });
 
-        testRange(options.min < 1, "Chance: Min cannot be less than 1.");
-        testRange(options.twentyfour && options.max > 24, "Chance: Max cannot be greater than 24 for twentyfour option.");
+        testRange(options.min < 0, "Chance: Min cannot be less than 0.");
+        testRange(options.twentyfour && options.max > 23, "Chance: Max cannot be greater than 23 for twentyfour option.");
         testRange(!options.twentyfour && options.max > 12, "Chance: Max cannot be greater than 12.");
         testRange(options.min > options.max, "Chance: Min cannot be greater than Max.");
 
@@ -2630,6 +2219,16 @@ module.exports = function(min, max) {
 
     Chance.prototype.timestamp = function () {
         return this.natural({min: 1, max: parseInt(new Date().getTime() / 1000, 10)});
+    };
+
+    Chance.prototype.weekday = function (options) {
+        options = initOptions(options, {weekday_only: false});
+        var weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+        if (!options.weekday_only) {
+            weekdays.push("Saturday");
+            weekdays.push("Sunday");
+        }
+        return this.pickone(weekdays);
     };
 
     Chance.prototype.year = function (options) {
@@ -2946,14 +2545,140 @@ module.exports = function(min, max) {
         return this.bimd5.md5(opts.str, opts.key, opts.raw);
     };
 
+    /**
+     * #Description:
+     * =====================================================
+     * Generate random file name with extention
+     *
+     * The argument provide extention type 
+     * -> raster 
+     * -> vector
+     * -> 3d
+     * -> document
+     *
+     * If noting is provided the function return random file name with random 
+     * extention type of any kind
+     *
+     * The user can validate the file name length range 
+     * If noting provided the generated file name is radom
+     *
+     * #Extention Pool :
+     * * Currently the supported extentions are 
+     *  -> some of the most popular raster image extentions
+     *  -> some of the most popular vector image extentions
+     *  -> some of the most popular 3d image extentions
+     *  -> some of the most popular document extentions
+     * 
+     * #Examples :
+     * =====================================================
+     *
+     * Return random file name with random extention. The file extention
+     * is provided by a predifined collection of extentions. More abouth the extention
+     * pool can be fond in #Extention Pool section
+     * 
+     * chance.file()                        
+     * => dsfsdhjf.xml
+     *
+     * In order to generate a file name with sspecific length, specify the 
+     * length property and integer value. The extention is going to be random
+     *  
+     * chance.file({length : 10})           
+     * => asrtineqos.pdf
+     *
+     * In order to geerate file with extention form some of the predifined groups
+     * of the extention pool just specify the extenton pool category in fileType property
+     *  
+     * chance.file({fileType : 'raster'})   
+     * => dshgssds.psd
+     *
+     * You can provide specific extention for your files
+     * chance.file({extention : 'html'})    
+     * => djfsd.html
+     *
+     * Or you could pass custom collection of extentons bt array or by object
+     * chance.file({extentions : [...]})    
+     * => dhgsdsd.psd
+     *  
+     * chance.file({extentions : { key : [...], key : [...]}})
+     * => djsfksdjsd.xml
+     * 
+     * @param  [collection] options 
+     * @return [string]
+     * 
+     */
+    Chance.prototype.file = function(options) {
+        
+        var fileOptions = options || {};
+        var poolCollectionKey = "fileExtension";
+        var typeRange   = Object.keys(this.get("fileExtension"));//['raster', 'vector', '3d', 'document'];
+        var fileName;
+        var fileExtention;
+
+        // Generate random file name 
+        fileName = chance.word({length : fileOptions.length});
+
+        // Generate file by specific extention provided by the user
+        if(fileOptions.extention) {
+
+            fileExtention = fileOptions.extention;
+            return (fileName + '.' + fileExtention);
+        }
+
+        // Generate file by specific axtention collection
+        if(fileOptions.extentions) {
+
+            if(Array.isArray(fileOptions.extentions)) {
+
+                fileExtention = this.pickone(fileOptions.extentions);
+                return (fileName + '.' + fileExtention);
+            }
+            else if(fileOptions.extentions.constructor === Object) {
+                
+                var extentionObjectCollection = fileOptions.extentions;
+                var keys = Object.keys(extentionObjectCollection);
+
+                fileExtention = this.pickone(extentionObjectCollection[this.pickone(keys)]);
+                return (fileName + '.' + fileExtention);
+            }
+
+            throw new Error("Expect collection of type Array or Object to be passed as an argument ");
+        } 
+
+        // Generate file extention based on specific file type
+        if(fileOptions.fileType) {
+
+            var fileType = fileOptions.fileType;
+            if(typeRange.indexOf(fileType) !== -1) {
+
+                fileExtention = this.pickone(this.get(poolCollectionKey)[fileType]);
+                return (fileName + '.' + fileExtention);
+            }
+
+            throw new Error("Expect file type value to be 'raster', 'vector', '3d' or 'document' ");
+        }
+
+        // Generate random file name if no extenton options are passed
+        fileExtention = this.pickone(this.get(poolCollectionKey)[this.pickone(typeRange)]);
+        return (fileName + '.' + fileExtention);
+    };     
+
     var data = {
 
         firstNames: {
-            "male": ["James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph", "Charles", "Thomas", "Christopher", "Daniel", "Matthew", "George", "Donald", "Anthony", "Paul", "Mark", "Edward", "Steven", "Kenneth", "Andrew", "Brian", "Joshua", "Kevin", "Ronald", "Timothy", "Jason", "Jeffrey", "Frank", "Gary", "Ryan", "Nicholas", "Eric", "Stephen", "Jacob", "Larry", "Jonathan", "Scott", "Raymond", "Justin", "Brandon", "Gregory", "Samuel", "Benjamin", "Patrick", "Jack", "Henry", "Walter", "Dennis", "Jerry", "Alexander", "Peter", "Tyler", "Douglas", "Harold", "Aaron", "Jose", "Adam", "Arthur", "Zachary", "Carl", "Nathan", "Albert", "Kyle", "Lawrence", "Joe", "Willie", "Gerald", "Roger", "Keith", "Jeremy", "Terry", "Harry", "Ralph", "Sean", "Jesse", "Roy", "Louis", "Billy", "Austin", "Bruce", "Eugene", "Christian", "Bryan", "Wayne", "Russell", "Howard", "Fred", "Ethan", "Jordan", "Philip", "Alan", "Juan", "Randy", "Vincent", "Bobby", "Dylan", "Johnny", "Phillip", "Victor", "Clarence", "Ernest", "Martin", "Craig", "Stanley", "Shawn", "Travis", "Bradley", "Leonard", "Earl", "Gabriel", "Jimmy", "Francis", "Todd", "Noah", "Danny", "Dale", "Cody", "Carlos", "Allen", "Frederick", "Logan", "Curtis", "Alex", "Joel", "Luis", "Norman", "Marvin", "Glenn", "Tony", "Nathaniel", "Rodney", "Melvin", "Alfred", "Steve", "Cameron", "Chad", "Edwin", "Caleb", "Evan", "Antonio", "Lee", "Herbert", "Jeffery", "Isaac", "Derek", "Ricky", "Marcus", "Theodore", "Elijah", "Luke", "Jesus", "Eddie", "Troy", "Mike", "Dustin", "Ray", "Adrian", "Bernard", "Leroy", "Angel", "Randall", "Wesley", "Ian", "Jared", "Mason", "Hunter", "Calvin", "Oscar", "Clifford", "Jay", "Shane", "Ronnie", "Barry", "Lucas", "Corey", "Manuel", "Leo", "Tommy", "Warren", "Jackson", "Isaiah", "Connor", "Don", "Dean", "Jon", "Julian", "Miguel", "Bill", "Lloyd", "Charlie", "Mitchell", "Leon", "Jerome", "Darrell", "Jeremiah", "Alvin", "Brett", "Seth", "Floyd", "Jim", "Blake", "Micheal", "Gordon", "Trevor", "Lewis", "Erik", "Edgar", "Vernon", "Devin", "Gavin", "Jayden", "Chris", "Clyde", "Tom", "Derrick", "Mario", "Brent", "Marc", "Herman", "Chase", "Dominic", "Ricardo", "Franklin", "Maurice", "Max", "Aiden", "Owen", "Lester", "Gilbert", "Elmer", "Gene", "Francisco", "Glen", "Cory", "Garrett", "Clayton", "Sam", "Jorge", "Chester", "Alejandro", "Jeff", "Harvey", "Milton", "Cole", "Ivan", "Andre", "Duane", "Landon"],
-            "female": ["Mary", "Emma", "Elizabeth", "Minnie", "Margaret", "Ida", "Alice", "Bertha", "Sarah", "Annie", "Clara", "Ella", "Florence", "Cora", "Martha", "Laura", "Nellie", "Grace", "Carrie", "Maude", "Mabel", "Bessie", "Jennie", "Gertrude", "Julia", "Hattie", "Edith", "Mattie", "Rose", "Catherine", "Lillian", "Ada", "Lillie", "Helen", "Jessie", "Louise", "Ethel", "Lula", "Myrtle", "Eva", "Frances", "Lena", "Lucy", "Edna", "Maggie", "Pearl", "Daisy", "Fannie", "Josephine", "Dora", "Rosa", "Katherine", "Agnes", "Marie", "Nora", "May", "Mamie", "Blanche", "Stella", "Ellen", "Nancy", "Effie", "Sallie", "Nettie", "Della", "Lizzie", "Flora", "Susie", "Maud", "Mae", "Etta", "Harriet", "Sadie", "Caroline", "Katie", "Lydia", "Elsie", "Kate", "Susan", "Mollie", "Alma", "Addie", "Georgia", "Eliza", "Lulu", "Nannie", "Lottie", "Amanda", "Belle", "Charlotte", "Rebecca", "Ruth", "Viola", "Olive", "Amelia", "Hannah", "Jane", "Virginia", "Emily", "Matilda", "Irene", "Kathryn", "Esther", "Willie", "Henrietta", "Ollie", "Amy", "Rachel", "Sara", "Estella", "Theresa", "Augusta", "Ora", "Pauline", "Josie", "Lola", "Sophia", "Leona", "Anne", "Mildred", "Ann", "Beulah", "Callie", "Lou", "Delia", "Eleanor", "Barbara", "Iva", "Louisa", "Maria", "Mayme", "Evelyn", "Estelle", "Nina", "Betty", "Marion", "Bettie", "Dorothy", "Luella", "Inez", "Lela", "Rosie", "Allie", "Millie", "Janie", "Cornelia", "Victoria", "Ruby", "Winifred", "Alta", "Celia", "Christine", "Beatrice", "Birdie", "Harriett", "Mable", "Myra", "Sophie", "Tillie", "Isabel", "Sylvia", "Carolyn", "Isabelle", "Leila", "Sally", "Ina", "Essie", "Bertie", "Nell", "Alberta", "Katharine", "Lora", "Rena", "Mina", "Rhoda", "Mathilda", "Abbie", "Eula", "Dollie", "Hettie", "Eunice", "Fanny", "Ola", "Lenora", "Adelaide", "Christina", "Lelia", "Nelle", "Sue", "Johanna", "Lilly", "Lucinda", "Minerva", "Lettie", "Roxie", "Cynthia", "Helena", "Hilda", "Hulda", "Bernice", "Genevieve", "Jean", "Cordelia", "Marian", "Francis", "Jeanette", "Adeline", "Gussie", "Leah", "Lois", "Lura", "Mittie", "Hallie", "Isabella", "Olga", "Phoebe", "Teresa", "Hester", "Lida", "Lina", "Winnie", "Claudia", "Marguerite", "Vera", "Cecelia", "Bess", "Emilie", "John", "Rosetta", "Verna", "Myrtie", "Cecilia", "Elva", "Olivia", "Ophelia", "Georgie", "Elnora", "Violet", "Adele", "Lily", "Linnie", "Loretta", "Madge", "Polly", "Virgie", "Eugenia", "Lucile", "Lucille", "Mabelle", "Rosalie"]
+            "male": {
+                "en": ["James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph", "Charles", "Thomas", "Christopher", "Daniel", "Matthew", "George", "Donald", "Anthony", "Paul", "Mark", "Edward", "Steven", "Kenneth", "Andrew", "Brian", "Joshua", "Kevin", "Ronald", "Timothy", "Jason", "Jeffrey", "Frank", "Gary", "Ryan", "Nicholas", "Eric", "Stephen", "Jacob", "Larry", "Jonathan", "Scott", "Raymond", "Justin", "Brandon", "Gregory", "Samuel", "Benjamin", "Patrick", "Jack", "Henry", "Walter", "Dennis", "Jerry", "Alexander", "Peter", "Tyler", "Douglas", "Harold", "Aaron", "Jose", "Adam", "Arthur", "Zachary", "Carl", "Nathan", "Albert", "Kyle", "Lawrence", "Joe", "Willie", "Gerald", "Roger", "Keith", "Jeremy", "Terry", "Harry", "Ralph", "Sean", "Jesse", "Roy", "Louis", "Billy", "Austin", "Bruce", "Eugene", "Christian", "Bryan", "Wayne", "Russell", "Howard", "Fred", "Ethan", "Jordan", "Philip", "Alan", "Juan", "Randy", "Vincent", "Bobby", "Dylan", "Johnny", "Phillip", "Victor", "Clarence", "Ernest", "Martin", "Craig", "Stanley", "Shawn", "Travis", "Bradley", "Leonard", "Earl", "Gabriel", "Jimmy", "Francis", "Todd", "Noah", "Danny", "Dale", "Cody", "Carlos", "Allen", "Frederick", "Logan", "Curtis", "Alex", "Joel", "Luis", "Norman", "Marvin", "Glenn", "Tony", "Nathaniel", "Rodney", "Melvin", "Alfred", "Steve", "Cameron", "Chad", "Edwin", "Caleb", "Evan", "Antonio", "Lee", "Herbert", "Jeffery", "Isaac", "Derek", "Ricky", "Marcus", "Theodore", "Elijah", "Luke", "Jesus", "Eddie", "Troy", "Mike", "Dustin", "Ray", "Adrian", "Bernard", "Leroy", "Angel", "Randall", "Wesley", "Ian", "Jared", "Mason", "Hunter", "Calvin", "Oscar", "Clifford", "Jay", "Shane", "Ronnie", "Barry", "Lucas", "Corey", "Manuel", "Leo", "Tommy", "Warren", "Jackson", "Isaiah", "Connor", "Don", "Dean", "Jon", "Julian", "Miguel", "Bill", "Lloyd", "Charlie", "Mitchell", "Leon", "Jerome", "Darrell", "Jeremiah", "Alvin", "Brett", "Seth", "Floyd", "Jim", "Blake", "Micheal", "Gordon", "Trevor", "Lewis", "Erik", "Edgar", "Vernon", "Devin", "Gavin", "Jayden", "Chris", "Clyde", "Tom", "Derrick", "Mario", "Brent", "Marc", "Herman", "Chase", "Dominic", "Ricardo", "Franklin", "Maurice", "Max", "Aiden", "Owen", "Lester", "Gilbert", "Elmer", "Gene", "Francisco", "Glen", "Cory", "Garrett", "Clayton", "Sam", "Jorge", "Chester", "Alejandro", "Jeff", "Harvey", "Milton", "Cole", "Ivan", "Andre", "Duane", "Landon"],
+                "it": ["Francesco", "Alessandro", "Lorenzo", "Andrea", "Marco", "Leonardo", "Matteo", "Federico", "Mattia", "Riccardo", "Luca", "Davide", "Gabriele", "Edoardo", "Tommaso", "Giacomo", "Simone", "Christian", "Stefano", "Diego", "Filippo", "Giuseppe"]
+            },
+            "female": {
+                "en": ["Mary", "Emma", "Elizabeth", "Minnie", "Margaret", "Ida", "Alice", "Bertha", "Sarah", "Annie", "Clara", "Ella", "Florence", "Cora", "Martha", "Laura", "Nellie", "Grace", "Carrie", "Maude", "Mabel", "Bessie", "Jennie", "Gertrude", "Julia", "Hattie", "Edith", "Mattie", "Rose", "Catherine", "Lillian", "Ada", "Lillie", "Helen", "Jessie", "Louise", "Ethel", "Lula", "Myrtle", "Eva", "Frances", "Lena", "Lucy", "Edna", "Maggie", "Pearl", "Daisy", "Fannie", "Josephine", "Dora", "Rosa", "Katherine", "Agnes", "Marie", "Nora", "May", "Mamie", "Blanche", "Stella", "Ellen", "Nancy", "Effie", "Sallie", "Nettie", "Della", "Lizzie", "Flora", "Susie", "Maud", "Mae", "Etta", "Harriet", "Sadie", "Caroline", "Katie", "Lydia", "Elsie", "Kate", "Susan", "Mollie", "Alma", "Addie", "Georgia", "Eliza", "Lulu", "Nannie", "Lottie", "Amanda", "Belle", "Charlotte", "Rebecca", "Ruth", "Viola", "Olive", "Amelia", "Hannah", "Jane", "Virginia", "Emily", "Matilda", "Irene", "Kathryn", "Esther", "Willie", "Henrietta", "Ollie", "Amy", "Rachel", "Sara", "Estella", "Theresa", "Augusta", "Ora", "Pauline", "Josie", "Lola", "Sophia", "Leona", "Anne", "Mildred", "Ann", "Beulah", "Callie", "Lou", "Delia", "Eleanor", "Barbara", "Iva", "Louisa", "Maria", "Mayme", "Evelyn", "Estelle", "Nina", "Betty", "Marion", "Bettie", "Dorothy", "Luella", "Inez", "Lela", "Rosie", "Allie", "Millie", "Janie", "Cornelia", "Victoria", "Ruby", "Winifred", "Alta", "Celia", "Christine", "Beatrice", "Birdie", "Harriett", "Mable", "Myra", "Sophie", "Tillie", "Isabel", "Sylvia", "Carolyn", "Isabelle", "Leila", "Sally", "Ina", "Essie", "Bertie", "Nell", "Alberta", "Katharine", "Lora", "Rena", "Mina", "Rhoda", "Mathilda", "Abbie", "Eula", "Dollie", "Hettie", "Eunice", "Fanny", "Ola", "Lenora", "Adelaide", "Christina", "Lelia", "Nelle", "Sue", "Johanna", "Lilly", "Lucinda", "Minerva", "Lettie", "Roxie", "Cynthia", "Helena", "Hilda", "Hulda", "Bernice", "Genevieve", "Jean", "Cordelia", "Marian", "Francis", "Jeanette", "Adeline", "Gussie", "Leah", "Lois", "Lura", "Mittie", "Hallie", "Isabella", "Olga", "Phoebe", "Teresa", "Hester", "Lida", "Lina", "Winnie", "Claudia", "Marguerite", "Vera", "Cecelia", "Bess", "Emilie", "John", "Rosetta", "Verna", "Myrtie", "Cecilia", "Elva", "Olivia", "Ophelia", "Georgie", "Elnora", "Violet", "Adele", "Lily", "Linnie", "Loretta", "Madge", "Polly", "Virgie", "Eugenia", "Lucile", "Lucille", "Mabelle", "Rosalie"],
+                "it": ["Sofia", "Giulia", "Martina", "Giorgia", "Emma", "Chiara", "Aurora", "Sara", "Alice", "Beatrice", "Ginevra", "Elena", "Alessia", "Greta", "Francesca", "Eleonora", "Viola", "Anna", "Elisa", "Giada", "Matilde", "Laura", "Nicole", "Asia", "Camilla", "Arianna", "Rachele", "Rebecca", "Gaia"]
+            }
         },
 
-        lastNames: ['Smith', 'Johnson', 'Williams', 'Jones', 'Brown', 'Davis', 'Miller', 'Wilson', 'Moore', 'Taylor', 'Anderson', 'Thomas', 'Jackson', 'White', 'Harris', 'Martin', 'Thompson', 'Garcia', 'Martinez', 'Robinson', 'Clark', 'Rodriguez', 'Lewis', 'Lee', 'Walker', 'Hall', 'Allen', 'Young', 'Hernandez', 'King', 'Wright', 'Lopez', 'Hill', 'Scott', 'Green', 'Adams', 'Baker', 'Gonzalez', 'Nelson', 'Carter', 'Mitchell', 'Perez', 'Roberts', 'Turner', 'Phillips', 'Campbell', 'Parker', 'Evans', 'Edwards', 'Collins', 'Stewart', 'Sanchez', 'Morris', 'Rogers', 'Reed', 'Cook', 'Morgan', 'Bell', 'Murphy', 'Bailey', 'Rivera', 'Cooper', 'Richardson', 'Cox', 'Howard', 'Ward', 'Torres', 'Peterson', 'Gray', 'Ramirez', 'James', 'Watson', 'Brooks', 'Kelly', 'Sanders', 'Price', 'Bennett', 'Wood', 'Barnes', 'Ross', 'Henderson', 'Coleman', 'Jenkins', 'Perry', 'Powell', 'Long', 'Patterson', 'Hughes', 'Flores', 'Washington', 'Butler', 'Simmons', 'Foster', 'Gonzales', 'Bryant', 'Alexander', 'Russell', 'Griffin', 'Diaz', 'Hayes', 'Myers', 'Ford', 'Hamilton', 'Graham', 'Sullivan', 'Wallace', 'Woods', 'Cole', 'West', 'Jordan', 'Owens', 'Reynolds', 'Fisher', 'Ellis', 'Harrison', 'Gibson', 'McDonald', 'Cruz', 'Marshall', 'Ortiz', 'Gomez', 'Murray', 'Freeman', 'Wells', 'Webb', 'Simpson', 'Stevens', 'Tucker', 'Porter', 'Hunter', 'Hicks', 'Crawford', 'Henry', 'Boyd', 'Mason', 'Morales', 'Kennedy', 'Warren', 'Dixon', 'Ramos', 'Reyes', 'Burns', 'Gordon', 'Shaw', 'Holmes', 'Rice', 'Robertson', 'Hunt', 'Black', 'Daniels', 'Palmer', 'Mills', 'Nichols', 'Grant', 'Knight', 'Ferguson', 'Rose', 'Stone', 'Hawkins', 'Dunn', 'Perkins', 'Hudson', 'Spencer', 'Gardner', 'Stephens', 'Payne', 'Pierce', 'Berry', 'Matthews', 'Arnold', 'Wagner', 'Willis', 'Ray', 'Watkins', 'Olson', 'Carroll', 'Duncan', 'Snyder', 'Hart', 'Cunningham', 'Bradley', 'Lane', 'Andrews', 'Ruiz', 'Harper', 'Fox', 'Riley', 'Armstrong', 'Carpenter', 'Weaver', 'Greene', 'Lawrence', 'Elliott', 'Chavez', 'Sims', 'Austin', 'Peters', 'Kelley', 'Franklin', 'Lawson', 'Fields', 'Gutierrez', 'Ryan', 'Schmidt', 'Carr', 'Vasquez', 'Castillo', 'Wheeler', 'Chapman', 'Oliver', 'Montgomery', 'Richards', 'Williamson', 'Johnston', 'Banks', 'Meyer', 'Bishop', 'McCoy', 'Howell', 'Alvarez', 'Morrison', 'Hansen', 'Fernandez', 'Garza', 'Harvey', 'Little', 'Burton', 'Stanley', 'Nguyen', 'George', 'Jacobs', 'Reid', 'Kim', 'Fuller', 'Lynch', 'Dean', 'Gilbert', 'Garrett', 'Romero', 'Welch', 'Larson', 'Frazier', 'Burke', 'Hanson', 'Day', 'Mendoza', 'Moreno', 'Bowman', 'Medina', 'Fowler', 'Brewer', 'Hoffman', 'Carlson', 'Silva', 'Pearson', 'Holland', 'Douglas', 'Fleming', 'Jensen', 'Vargas', 'Byrd', 'Davidson', 'Hopkins', 'May', 'Terry', 'Herrera', 'Wade', 'Soto', 'Walters', 'Curtis', 'Neal', 'Caldwell', 'Lowe', 'Jennings', 'Barnett', 'Graves', 'Jimenez', 'Horton', 'Shelton', 'Barrett', 'Obrien', 'Castro', 'Sutton', 'Gregory', 'McKinney', 'Lucas', 'Miles', 'Craig', 'Rodriquez', 'Chambers', 'Holt', 'Lambert', 'Fletcher', 'Watts', 'Bates', 'Hale', 'Rhodes', 'Pena', 'Beck', 'Newman', 'Haynes', 'McDaniel', 'Mendez', 'Bush', 'Vaughn', 'Parks', 'Dawson', 'Santiago', 'Norris', 'Hardy', 'Love', 'Steele', 'Curry', 'Powers', 'Schultz', 'Barker', 'Guzman', 'Page', 'Munoz', 'Ball', 'Keller', 'Chandler', 'Weber', 'Leonard', 'Walsh', 'Lyons', 'Ramsey', 'Wolfe', 'Schneider', 'Mullins', 'Benson', 'Sharp', 'Bowen', 'Daniel', 'Barber', 'Cummings', 'Hines', 'Baldwin', 'Griffith', 'Valdez', 'Hubbard', 'Salazar', 'Reeves', 'Warner', 'Stevenson', 'Burgess', 'Santos', 'Tate', 'Cross', 'Garner', 'Mann', 'Mack', 'Moss', 'Thornton', 'Dennis', 'McGee', 'Farmer', 'Delgado', 'Aguilar', 'Vega', 'Glover', 'Manning', 'Cohen', 'Harmon', 'Rodgers', 'Robbins', 'Newton', 'Todd', 'Blair', 'Higgins', 'Ingram', 'Reese', 'Cannon', 'Strickland', 'Townsend', 'Potter', 'Goodwin', 'Walton', 'Rowe', 'Hampton', 'Ortega', 'Patton', 'Swanson', 'Joseph', 'Francis', 'Goodman', 'Maldonado', 'Yates', 'Becker', 'Erickson', 'Hodges', 'Rios', 'Conner', 'Adkins', 'Webster', 'Norman', 'Malone', 'Hammond', 'Flowers', 'Cobb', 'Moody', 'Quinn', 'Blake', 'Maxwell', 'Pope', 'Floyd', 'Osborne', 'Paul', 'McCarthy', 'Guerrero', 'Lindsey', 'Estrada', 'Sandoval', 'Gibbs', 'Tyler', 'Gross', 'Fitzgerald', 'Stokes', 'Doyle', 'Sherman', 'Saunders', 'Wise', 'Colon', 'Gill', 'Alvarado', 'Greer', 'Padilla', 'Simon', 'Waters', 'Nunez', 'Ballard', 'Schwartz', 'McBride', 'Houston', 'Christensen', 'Klein', 'Pratt', 'Briggs', 'Parsons', 'McLaughlin', 'Zimmerman', 'French', 'Buchanan', 'Moran', 'Copeland', 'Roy', 'Pittman', 'Brady', 'McCormick', 'Holloway', 'Brock', 'Poole', 'Frank', 'Logan', 'Owen', 'Bass', 'Marsh', 'Drake', 'Wong', 'Jefferson', 'Park', 'Morton', 'Abbott', 'Sparks', 'Patrick', 'Norton', 'Huff', 'Clayton', 'Massey', 'Lloyd', 'Figueroa', 'Carson', 'Bowers', 'Roberson', 'Barton', 'Tran', 'Lamb', 'Harrington', 'Casey', 'Boone', 'Cortez', 'Clarke', 'Mathis', 'Singleton', 'Wilkins', 'Cain', 'Bryan', 'Underwood', 'Hogan', 'McKenzie', 'Collier', 'Luna', 'Phelps', 'McGuire', 'Allison', 'Bridges', 'Wilkerson', 'Nash', 'Summers', 'Atkins'],
+        lastNames: {
+            "en": ['Smith', 'Johnson', 'Williams', 'Jones', 'Brown', 'Davis', 'Miller', 'Wilson', 'Moore', 'Taylor', 'Anderson', 'Thomas', 'Jackson', 'White', 'Harris', 'Martin', 'Thompson', 'Garcia', 'Martinez', 'Robinson', 'Clark', 'Rodriguez', 'Lewis', 'Lee', 'Walker', 'Hall', 'Allen', 'Young', 'Hernandez', 'King', 'Wright', 'Lopez', 'Hill', 'Scott', 'Green', 'Adams', 'Baker', 'Gonzalez', 'Nelson', 'Carter', 'Mitchell', 'Perez', 'Roberts', 'Turner', 'Phillips', 'Campbell', 'Parker', 'Evans', 'Edwards', 'Collins', 'Stewart', 'Sanchez', 'Morris', 'Rogers', 'Reed', 'Cook', 'Morgan', 'Bell', 'Murphy', 'Bailey', 'Rivera', 'Cooper', 'Richardson', 'Cox', 'Howard', 'Ward', 'Torres', 'Peterson', 'Gray', 'Ramirez', 'James', 'Watson', 'Brooks', 'Kelly', 'Sanders', 'Price', 'Bennett', 'Wood', 'Barnes', 'Ross', 'Henderson', 'Coleman', 'Jenkins', 'Perry', 'Powell', 'Long', 'Patterson', 'Hughes', 'Flores', 'Washington', 'Butler', 'Simmons', 'Foster', 'Gonzales', 'Bryant', 'Alexander', 'Russell', 'Griffin', 'Diaz', 'Hayes', 'Myers', 'Ford', 'Hamilton', 'Graham', 'Sullivan', 'Wallace', 'Woods', 'Cole', 'West', 'Jordan', 'Owens', 'Reynolds', 'Fisher', 'Ellis', 'Harrison', 'Gibson', 'McDonald', 'Cruz', 'Marshall', 'Ortiz', 'Gomez', 'Murray', 'Freeman', 'Wells', 'Webb', 'Simpson', 'Stevens', 'Tucker', 'Porter', 'Hunter', 'Hicks', 'Crawford', 'Henry', 'Boyd', 'Mason', 'Morales', 'Kennedy', 'Warren', 'Dixon', 'Ramos', 'Reyes', 'Burns', 'Gordon', 'Shaw', 'Holmes', 'Rice', 'Robertson', 'Hunt', 'Black', 'Daniels', 'Palmer', 'Mills', 'Nichols', 'Grant', 'Knight', 'Ferguson', 'Rose', 'Stone', 'Hawkins', 'Dunn', 'Perkins', 'Hudson', 'Spencer', 'Gardner', 'Stephens', 'Payne', 'Pierce', 'Berry', 'Matthews', 'Arnold', 'Wagner', 'Willis', 'Ray', 'Watkins', 'Olson', 'Carroll', 'Duncan', 'Snyder', 'Hart', 'Cunningham', 'Bradley', 'Lane', 'Andrews', 'Ruiz', 'Harper', 'Fox', 'Riley', 'Armstrong', 'Carpenter', 'Weaver', 'Greene', 'Lawrence', 'Elliott', 'Chavez', 'Sims', 'Austin', 'Peters', 'Kelley', 'Franklin', 'Lawson', 'Fields', 'Gutierrez', 'Ryan', 'Schmidt', 'Carr', 'Vasquez', 'Castillo', 'Wheeler', 'Chapman', 'Oliver', 'Montgomery', 'Richards', 'Williamson', 'Johnston', 'Banks', 'Meyer', 'Bishop', 'McCoy', 'Howell', 'Alvarez', 'Morrison', 'Hansen', 'Fernandez', 'Garza', 'Harvey', 'Little', 'Burton', 'Stanley', 'Nguyen', 'George', 'Jacobs', 'Reid', 'Kim', 'Fuller', 'Lynch', 'Dean', 'Gilbert', 'Garrett', 'Romero', 'Welch', 'Larson', 'Frazier', 'Burke', 'Hanson', 'Day', 'Mendoza', 'Moreno', 'Bowman', 'Medina', 'Fowler', 'Brewer', 'Hoffman', 'Carlson', 'Silva', 'Pearson', 'Holland', 'Douglas', 'Fleming', 'Jensen', 'Vargas', 'Byrd', 'Davidson', 'Hopkins', 'May', 'Terry', 'Herrera', 'Wade', 'Soto', 'Walters', 'Curtis', 'Neal', 'Caldwell', 'Lowe', 'Jennings', 'Barnett', 'Graves', 'Jimenez', 'Horton', 'Shelton', 'Barrett', 'Obrien', 'Castro', 'Sutton', 'Gregory', 'McKinney', 'Lucas', 'Miles', 'Craig', 'Rodriquez', 'Chambers', 'Holt', 'Lambert', 'Fletcher', 'Watts', 'Bates', 'Hale', 'Rhodes', 'Pena', 'Beck', 'Newman', 'Haynes', 'McDaniel', 'Mendez', 'Bush', 'Vaughn', 'Parks', 'Dawson', 'Santiago', 'Norris', 'Hardy', 'Love', 'Steele', 'Curry', 'Powers', 'Schultz', 'Barker', 'Guzman', 'Page', 'Munoz', 'Ball', 'Keller', 'Chandler', 'Weber', 'Leonard', 'Walsh', 'Lyons', 'Ramsey', 'Wolfe', 'Schneider', 'Mullins', 'Benson', 'Sharp', 'Bowen', 'Daniel', 'Barber', 'Cummings', 'Hines', 'Baldwin', 'Griffith', 'Valdez', 'Hubbard', 'Salazar', 'Reeves', 'Warner', 'Stevenson', 'Burgess', 'Santos', 'Tate', 'Cross', 'Garner', 'Mann', 'Mack', 'Moss', 'Thornton', 'Dennis', 'McGee', 'Farmer', 'Delgado', 'Aguilar', 'Vega', 'Glover', 'Manning', 'Cohen', 'Harmon', 'Rodgers', 'Robbins', 'Newton', 'Todd', 'Blair', 'Higgins', 'Ingram', 'Reese', 'Cannon', 'Strickland', 'Townsend', 'Potter', 'Goodwin', 'Walton', 'Rowe', 'Hampton', 'Ortega', 'Patton', 'Swanson', 'Joseph', 'Francis', 'Goodman', 'Maldonado', 'Yates', 'Becker', 'Erickson', 'Hodges', 'Rios', 'Conner', 'Adkins', 'Webster', 'Norman', 'Malone', 'Hammond', 'Flowers', 'Cobb', 'Moody', 'Quinn', 'Blake', 'Maxwell', 'Pope', 'Floyd', 'Osborne', 'Paul', 'McCarthy', 'Guerrero', 'Lindsey', 'Estrada', 'Sandoval', 'Gibbs', 'Tyler', 'Gross', 'Fitzgerald', 'Stokes', 'Doyle', 'Sherman', 'Saunders', 'Wise', 'Colon', 'Gill', 'Alvarado', 'Greer', 'Padilla', 'Simon', 'Waters', 'Nunez', 'Ballard', 'Schwartz', 'McBride', 'Houston', 'Christensen', 'Klein', 'Pratt', 'Briggs', 'Parsons', 'McLaughlin', 'Zimmerman', 'French', 'Buchanan', 'Moran', 'Copeland', 'Roy', 'Pittman', 'Brady', 'McCormick', 'Holloway', 'Brock', 'Poole', 'Frank', 'Logan', 'Owen', 'Bass', 'Marsh', 'Drake', 'Wong', 'Jefferson', 'Park', 'Morton', 'Abbott', 'Sparks', 'Patrick', 'Norton', 'Huff', 'Clayton', 'Massey', 'Lloyd', 'Figueroa', 'Carson', 'Bowers', 'Roberson', 'Barton', 'Tran', 'Lamb', 'Harrington', 'Casey', 'Boone', 'Cortez', 'Clarke', 'Mathis', 'Singleton', 'Wilkins', 'Cain', 'Bryan', 'Underwood', 'Hogan', 'McKenzie', 'Collier', 'Luna', 'Phelps', 'McGuire', 'Allison', 'Bridges', 'Wilkerson', 'Nash', 'Summers', 'Atkins'],
+            "it": ['Rossi', 'Ferrari', 'Russo', 'Bianchi', 'Esposito', 'Colombo', 'Romano', 'Ricci', 'Gallo', 'Greco', 'Conti', 'Marino', 'De Luca', 'Bruno', 'Costa', 'Giordano', 'Mancini', 'Lombardi', 'Barbieri', 'Moretti', 'Fontana', 'Rizzo', 'Santoro', 'Caruso', 'Mariani', 'Martini', 'Ferrara', 'Galli', 'Rinaldi', 'Leone', 'Serra', 'Conte', 'Villa', 'Marini', 'Ferri', 'Bianco', 'Monti', 'De Santis', 'Parisi', 'Fiore', 'De Angelis', 'Longo', 'Sanna', 'Sala', 'Romeo', 'Martinelli', 'Grassi', 'Neri', 'Marchetti', 'Vitale', 'Mari', 'Gentile', 'Viola', 'Marchi', 'Rossetti', 'Bellini', 'Grasso', 'Fabbri', 'Franco', 'Messina', 'Rosso', 'Rizzi', 'D\'Angelo', 'Morelli', 'Giorgi', 'Riva', 'Mazza', 'De Rosa', 'Testa', 'Coppola', 'Amato', 'Donati', 'Palumbo', 'Ferro', 'Basile', 'Ferraro', 'Franchi', 'Castelli', 'Lombardo', 'Farina', 'Carli', 'Bruni', 'Piras', 'Giuliani', 'Martino', 'Poli', 'Gasparini', 'Montanari', 'Orlando', 'Alberti', 'Bernardi', 'Silvestri', 'Ferretti', 'Pellegrino', 'Sartori', 'Palmieri', 'Cattaneo', 'Benedetti', 'Valenti', 'Bassi', 'Verdi']
+        },
 
         // Data taken from https://github.com/umpirsky/country-list/blob/master/country/cldr/en_US/country.json
         countries: [{"name":"Afghanistan","abbreviation":"AF"},{"name":"Albania","abbreviation":"AL"},{"name":"Algeria","abbreviation":"DZ"},{"name":"American Samoa","abbreviation":"AS"},{"name":"Andorra","abbreviation":"AD"},{"name":"Angola","abbreviation":"AO"},{"name":"Anguilla","abbreviation":"AI"},{"name":"Antarctica","abbreviation":"AQ"},{"name":"Antigua and Barbuda","abbreviation":"AG"},{"name":"Argentina","abbreviation":"AR"},{"name":"Armenia","abbreviation":"AM"},{"name":"Aruba","abbreviation":"AW"},{"name":"Australia","abbreviation":"AU"},{"name":"Austria","abbreviation":"AT"},{"name":"Azerbaijan","abbreviation":"AZ"},{"name":"Bahamas","abbreviation":"BS"},{"name":"Bahrain","abbreviation":"BH"},{"name":"Bangladesh","abbreviation":"BD"},{"name":"Barbados","abbreviation":"BB"},{"name":"Belarus","abbreviation":"BY"},{"name":"Belgium","abbreviation":"BE"},{"name":"Belize","abbreviation":"BZ"},{"name":"Benin","abbreviation":"BJ"},{"name":"Bermuda","abbreviation":"BM"},{"name":"Bhutan","abbreviation":"BT"},{"name":"Bolivia","abbreviation":"BO"},{"name":"Bosnia and Herzegovina","abbreviation":"BA"},{"name":"Botswana","abbreviation":"BW"},{"name":"Bouvet Island","abbreviation":"BV"},{"name":"Brazil","abbreviation":"BR"},{"name":"British Antarctic Territory","abbreviation":"BQ"},{"name":"British Indian Ocean Territory","abbreviation":"IO"},{"name":"British Virgin Islands","abbreviation":"VG"},{"name":"Brunei","abbreviation":"BN"},{"name":"Bulgaria","abbreviation":"BG"},{"name":"Burkina Faso","abbreviation":"BF"},{"name":"Burundi","abbreviation":"BI"},{"name":"Cambodia","abbreviation":"KH"},{"name":"Cameroon","abbreviation":"CM"},{"name":"Canada","abbreviation":"CA"},{"name":"Canton and Enderbury Islands","abbreviation":"CT"},{"name":"Cape Verde","abbreviation":"CV"},{"name":"Cayman Islands","abbreviation":"KY"},{"name":"Central African Republic","abbreviation":"CF"},{"name":"Chad","abbreviation":"TD"},{"name":"Chile","abbreviation":"CL"},{"name":"China","abbreviation":"CN"},{"name":"Christmas Island","abbreviation":"CX"},{"name":"Cocos [Keeling] Islands","abbreviation":"CC"},{"name":"Colombia","abbreviation":"CO"},{"name":"Comoros","abbreviation":"KM"},{"name":"Congo - Brazzaville","abbreviation":"CG"},{"name":"Congo - Kinshasa","abbreviation":"CD"},{"name":"Cook Islands","abbreviation":"CK"},{"name":"Costa Rica","abbreviation":"CR"},{"name":"Croatia","abbreviation":"HR"},{"name":"Cuba","abbreviation":"CU"},{"name":"Cyprus","abbreviation":"CY"},{"name":"Czech Republic","abbreviation":"CZ"},{"name":"Côte d’Ivoire","abbreviation":"CI"},{"name":"Denmark","abbreviation":"DK"},{"name":"Djibouti","abbreviation":"DJ"},{"name":"Dominica","abbreviation":"DM"},{"name":"Dominican Republic","abbreviation":"DO"},{"name":"Dronning Maud Land","abbreviation":"NQ"},{"name":"East Germany","abbreviation":"DD"},{"name":"Ecuador","abbreviation":"EC"},{"name":"Egypt","abbreviation":"EG"},{"name":"El Salvador","abbreviation":"SV"},{"name":"Equatorial Guinea","abbreviation":"GQ"},{"name":"Eritrea","abbreviation":"ER"},{"name":"Estonia","abbreviation":"EE"},{"name":"Ethiopia","abbreviation":"ET"},{"name":"Falkland Islands","abbreviation":"FK"},{"name":"Faroe Islands","abbreviation":"FO"},{"name":"Fiji","abbreviation":"FJ"},{"name":"Finland","abbreviation":"FI"},{"name":"France","abbreviation":"FR"},{"name":"French Guiana","abbreviation":"GF"},{"name":"French Polynesia","abbreviation":"PF"},{"name":"French Southern Territories","abbreviation":"TF"},{"name":"French Southern and Antarctic Territories","abbreviation":"FQ"},{"name":"Gabon","abbreviation":"GA"},{"name":"Gambia","abbreviation":"GM"},{"name":"Georgia","abbreviation":"GE"},{"name":"Germany","abbreviation":"DE"},{"name":"Ghana","abbreviation":"GH"},{"name":"Gibraltar","abbreviation":"GI"},{"name":"Greece","abbreviation":"GR"},{"name":"Greenland","abbreviation":"GL"},{"name":"Grenada","abbreviation":"GD"},{"name":"Guadeloupe","abbreviation":"GP"},{"name":"Guam","abbreviation":"GU"},{"name":"Guatemala","abbreviation":"GT"},{"name":"Guernsey","abbreviation":"GG"},{"name":"Guinea","abbreviation":"GN"},{"name":"Guinea-Bissau","abbreviation":"GW"},{"name":"Guyana","abbreviation":"GY"},{"name":"Haiti","abbreviation":"HT"},{"name":"Heard Island and McDonald Islands","abbreviation":"HM"},{"name":"Honduras","abbreviation":"HN"},{"name":"Hong Kong SAR China","abbreviation":"HK"},{"name":"Hungary","abbreviation":"HU"},{"name":"Iceland","abbreviation":"IS"},{"name":"India","abbreviation":"IN"},{"name":"Indonesia","abbreviation":"ID"},{"name":"Iran","abbreviation":"IR"},{"name":"Iraq","abbreviation":"IQ"},{"name":"Ireland","abbreviation":"IE"},{"name":"Isle of Man","abbreviation":"IM"},{"name":"Israel","abbreviation":"IL"},{"name":"Italy","abbreviation":"IT"},{"name":"Jamaica","abbreviation":"JM"},{"name":"Japan","abbreviation":"JP"},{"name":"Jersey","abbreviation":"JE"},{"name":"Johnston Island","abbreviation":"JT"},{"name":"Jordan","abbreviation":"JO"},{"name":"Kazakhstan","abbreviation":"KZ"},{"name":"Kenya","abbreviation":"KE"},{"name":"Kiribati","abbreviation":"KI"},{"name":"Kuwait","abbreviation":"KW"},{"name":"Kyrgyzstan","abbreviation":"KG"},{"name":"Laos","abbreviation":"LA"},{"name":"Latvia","abbreviation":"LV"},{"name":"Lebanon","abbreviation":"LB"},{"name":"Lesotho","abbreviation":"LS"},{"name":"Liberia","abbreviation":"LR"},{"name":"Libya","abbreviation":"LY"},{"name":"Liechtenstein","abbreviation":"LI"},{"name":"Lithuania","abbreviation":"LT"},{"name":"Luxembourg","abbreviation":"LU"},{"name":"Macau SAR China","abbreviation":"MO"},{"name":"Macedonia","abbreviation":"MK"},{"name":"Madagascar","abbreviation":"MG"},{"name":"Malawi","abbreviation":"MW"},{"name":"Malaysia","abbreviation":"MY"},{"name":"Maldives","abbreviation":"MV"},{"name":"Mali","abbreviation":"ML"},{"name":"Malta","abbreviation":"MT"},{"name":"Marshall Islands","abbreviation":"MH"},{"name":"Martinique","abbreviation":"MQ"},{"name":"Mauritania","abbreviation":"MR"},{"name":"Mauritius","abbreviation":"MU"},{"name":"Mayotte","abbreviation":"YT"},{"name":"Metropolitan France","abbreviation":"FX"},{"name":"Mexico","abbreviation":"MX"},{"name":"Micronesia","abbreviation":"FM"},{"name":"Midway Islands","abbreviation":"MI"},{"name":"Moldova","abbreviation":"MD"},{"name":"Monaco","abbreviation":"MC"},{"name":"Mongolia","abbreviation":"MN"},{"name":"Montenegro","abbreviation":"ME"},{"name":"Montserrat","abbreviation":"MS"},{"name":"Morocco","abbreviation":"MA"},{"name":"Mozambique","abbreviation":"MZ"},{"name":"Myanmar [Burma]","abbreviation":"MM"},{"name":"Namibia","abbreviation":"NA"},{"name":"Nauru","abbreviation":"NR"},{"name":"Nepal","abbreviation":"NP"},{"name":"Netherlands","abbreviation":"NL"},{"name":"Netherlands Antilles","abbreviation":"AN"},{"name":"Neutral Zone","abbreviation":"NT"},{"name":"New Caledonia","abbreviation":"NC"},{"name":"New Zealand","abbreviation":"NZ"},{"name":"Nicaragua","abbreviation":"NI"},{"name":"Niger","abbreviation":"NE"},{"name":"Nigeria","abbreviation":"NG"},{"name":"Niue","abbreviation":"NU"},{"name":"Norfolk Island","abbreviation":"NF"},{"name":"North Korea","abbreviation":"KP"},{"name":"North Vietnam","abbreviation":"VD"},{"name":"Northern Mariana Islands","abbreviation":"MP"},{"name":"Norway","abbreviation":"NO"},{"name":"Oman","abbreviation":"OM"},{"name":"Pacific Islands Trust Territory","abbreviation":"PC"},{"name":"Pakistan","abbreviation":"PK"},{"name":"Palau","abbreviation":"PW"},{"name":"Palestinian Territories","abbreviation":"PS"},{"name":"Panama","abbreviation":"PA"},{"name":"Panama Canal Zone","abbreviation":"PZ"},{"name":"Papua New Guinea","abbreviation":"PG"},{"name":"Paraguay","abbreviation":"PY"},{"name":"People's Democratic Republic of Yemen","abbreviation":"YD"},{"name":"Peru","abbreviation":"PE"},{"name":"Philippines","abbreviation":"PH"},{"name":"Pitcairn Islands","abbreviation":"PN"},{"name":"Poland","abbreviation":"PL"},{"name":"Portugal","abbreviation":"PT"},{"name":"Puerto Rico","abbreviation":"PR"},{"name":"Qatar","abbreviation":"QA"},{"name":"Romania","abbreviation":"RO"},{"name":"Russia","abbreviation":"RU"},{"name":"Rwanda","abbreviation":"RW"},{"name":"Réunion","abbreviation":"RE"},{"name":"Saint Barthélemy","abbreviation":"BL"},{"name":"Saint Helena","abbreviation":"SH"},{"name":"Saint Kitts and Nevis","abbreviation":"KN"},{"name":"Saint Lucia","abbreviation":"LC"},{"name":"Saint Martin","abbreviation":"MF"},{"name":"Saint Pierre and Miquelon","abbreviation":"PM"},{"name":"Saint Vincent and the Grenadines","abbreviation":"VC"},{"name":"Samoa","abbreviation":"WS"},{"name":"San Marino","abbreviation":"SM"},{"name":"Saudi Arabia","abbreviation":"SA"},{"name":"Senegal","abbreviation":"SN"},{"name":"Serbia","abbreviation":"RS"},{"name":"Serbia and Montenegro","abbreviation":"CS"},{"name":"Seychelles","abbreviation":"SC"},{"name":"Sierra Leone","abbreviation":"SL"},{"name":"Singapore","abbreviation":"SG"},{"name":"Slovakia","abbreviation":"SK"},{"name":"Slovenia","abbreviation":"SI"},{"name":"Solomon Islands","abbreviation":"SB"},{"name":"Somalia","abbreviation":"SO"},{"name":"South Africa","abbreviation":"ZA"},{"name":"South Georgia and the South Sandwich Islands","abbreviation":"GS"},{"name":"South Korea","abbreviation":"KR"},{"name":"Spain","abbreviation":"ES"},{"name":"Sri Lanka","abbreviation":"LK"},{"name":"Sudan","abbreviation":"SD"},{"name":"Suriname","abbreviation":"SR"},{"name":"Svalbard and Jan Mayen","abbreviation":"SJ"},{"name":"Swaziland","abbreviation":"SZ"},{"name":"Sweden","abbreviation":"SE"},{"name":"Switzerland","abbreviation":"CH"},{"name":"Syria","abbreviation":"SY"},{"name":"São Tomé and Príncipe","abbreviation":"ST"},{"name":"Taiwan","abbreviation":"TW"},{"name":"Tajikistan","abbreviation":"TJ"},{"name":"Tanzania","abbreviation":"TZ"},{"name":"Thailand","abbreviation":"TH"},{"name":"Timor-Leste","abbreviation":"TL"},{"name":"Togo","abbreviation":"TG"},{"name":"Tokelau","abbreviation":"TK"},{"name":"Tonga","abbreviation":"TO"},{"name":"Trinidad and Tobago","abbreviation":"TT"},{"name":"Tunisia","abbreviation":"TN"},{"name":"Turkey","abbreviation":"TR"},{"name":"Turkmenistan","abbreviation":"TM"},{"name":"Turks and Caicos Islands","abbreviation":"TC"},{"name":"Tuvalu","abbreviation":"TV"},{"name":"U.S. Minor Outlying Islands","abbreviation":"UM"},{"name":"U.S. Miscellaneous Pacific Islands","abbreviation":"PU"},{"name":"U.S. Virgin Islands","abbreviation":"VI"},{"name":"Uganda","abbreviation":"UG"},{"name":"Ukraine","abbreviation":"UA"},{"name":"Union of Soviet Socialist Republics","abbreviation":"SU"},{"name":"United Arab Emirates","abbreviation":"AE"},{"name":"United Kingdom","abbreviation":"GB"},{"name":"United States","abbreviation":"US"},{"name":"Unknown or Invalid Region","abbreviation":"ZZ"},{"name":"Uruguay","abbreviation":"UY"},{"name":"Uzbekistan","abbreviation":"UZ"},{"name":"Vanuatu","abbreviation":"VU"},{"name":"Vatican City","abbreviation":"VA"},{"name":"Venezuela","abbreviation":"VE"},{"name":"Vietnam","abbreviation":"VN"},{"name":"Wake Island","abbreviation":"WK"},{"name":"Wallis and Futuna","abbreviation":"WF"},{"name":"Western Sahara","abbreviation":"EH"},{"name":"Yemen","abbreviation":"YE"},{"name":"Zambia","abbreviation":"ZM"},{"name":"Zimbabwe","abbreviation":"ZW"},{"name":"Åland Islands","abbreviation":"AX"}],
@@ -3288,7 +3013,26 @@ module.exports = function(min, max) {
             {'code' : 'ZAR', 'name' : 'South Africa Rand'},
             {'code' : 'ZMW', 'name' : 'Zambia Kwacha'},
             {'code' : 'ZWD', 'name' : 'Zimbabwe Dollar'}
-        ]
+        ],
+        
+        // return the names of all valide colors
+        colorNames : [  "AliceBlue", "Black", "Navy", "DarkBlue", "MediumBlue", "Blue", "DarkGreen", "Green", "Teal", "DarkCyan", "DeepSkyBlue", "DarkTurquoise", "MediumSpringGreen", "Lime", "SpringGreen",
+            "Aqua", "Cyan", "MidnightBlue", "DodgerBlue", "LightSeaGreen", "ForestGreen", "SeaGreen", "DarkSlateGray", "LimeGreen", "MediumSeaGreen", "Turquoise", "RoyalBlue", "SteelBlue", "DarkSlateBlue", "MediumTurquoise",
+            "Indigo", "DarkOliveGreen", "CadetBlue", "CornflowerBlue", "RebeccaPurple", "MediumAquaMarine", "DimGray", "SlateBlue", "OliveDrab", "SlateGray", "LightSlateGray", "MediumSlateBlue", "LawnGreen", "Chartreuse",
+            "Aquamarine", "Maroon", "Purple", "Olive", "Gray", "SkyBlue", "LightSkyBlue", "BlueViolet", "DarkRed", "DarkMagenta", "SaddleBrown", "Ivory", "White",
+            "DarkSeaGreen", "LightGreen", "MediumPurple", "DarkViolet", "PaleGreen", "DarkOrchid", "YellowGreen", "Sienna", "Brown", "DarkGray", "LightBlue", "GreenYellow", "PaleTurquoise", "LightSteelBlue", "PowderBlue",
+            "FireBrick", "DarkGoldenRod", "MediumOrchid", "RosyBrown", "DarkKhaki", "Silver", "MediumVioletRed", "IndianRed", "Peru", "Chocolate", "Tan", "LightGray", "Thistle", "Orchid", "GoldenRod", "PaleVioletRed",
+            "Crimson", "Gainsboro", "Plum", "BurlyWood", "LightCyan", "Lavender", "DarkSalmon", "Violet", "PaleGoldenRod", "LightCoral", "Khaki", "AliceBlue", "HoneyDew", "Azure", "SandyBrown", "Wheat", "Beige", "WhiteSmoke",
+            "MintCream", "GhostWhite", "Salmon", "AntiqueWhite", "Linen", "LightGoldenRodYellow", "OldLace", "Red", "Fuchsia", "Magenta", "DeepPink", "OrangeRed", "Tomato", "HotPink", "Coral", "DarkOrange", "LightSalmon", "Orange",
+            "LightPink", "Pink", "Gold", "PeachPuff", "NavajoWhite", "Moccasin", "Bisque", "MistyRose", "BlanchedAlmond", "PapayaWhip", "LavenderBlush", "SeaShell", "Cornsilk", "LemonChiffon", "FloralWhite", "Snow", "Yellow", "LightYellow"
+        ],        
+
+        fileExtension : {
+            "raster"    : ["bmp", "gif", "gpl", "ico", "jpeg", "psd", "png", "psp", "raw", "tiff"],
+            "vector"    : ["3dv", "amf", "awg", "ai", "cgm", "cdr", "cmx", "dxf", "e2d", "egt", "eps", "fs", "odg", "svg", "xar"],
+            "3d"        : ["3dmf", "3dm", "3mf", "3ds", "an8", "aoi", "blend", "cal3d", "cob", "ctm", "iob", "jas", "max", "mb", "mdx", "obj", "x", "x3d"],
+            "document"  : ["doc", "docx", "dot", "html", "xml", "odt", "odm", "ott", "csv", "rtf", "tex", "xhtml", "xps"]
+        }
     };
 
     var o_hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -3360,7 +3104,18 @@ module.exports = function(min, max) {
     };
 
     Chance.prototype.normal = function (options) {
-        options = initOptions(options, {mean : 0, dev : 1});
+        options = initOptions(options, {mean : 0, dev : 1, pool : []});
+
+        testRange(
+            options.pool.constructor !== Array,
+            "Chance: The pool option must be a valid array."
+        );
+
+        // If a pool has been passed, then we are returning an item from that pool,
+        // using the normal distribution settings that were passed in
+        if (options.pool.length > 0) {
+            return this.normal_pool(options);
+        }
 
         // The Marsaglia Polar method
         var s, u, v, norm,
@@ -3380,6 +3135,20 @@ module.exports = function(min, max) {
 
         // Shape and scale
         return dev * norm + mean;
+    };
+
+    Chance.prototype.normal_pool = function(options) {
+        var performanceCounter = 0;
+        do {
+            var idx = Math.round(this.normal({ mean: options.mean, dev: options.dev }));
+            if (idx < options.pool.length && idx >= 0) {
+                return options.pool[idx];
+            } else {
+                performanceCounter++;
+            }
+        } while(performanceCounter < 100);
+
+        throw new RangeError("Chance: Your pool is too small for the given mean and standard deviation. Please adjust.");
     };
 
     Chance.prototype.radio = function (options) {
@@ -3848,6 +3617,525 @@ module.exports = function(min, max) {
         window.chance = new Chance();
     }
 })();
+
+},{}],21:[function(require,module,exports){
+'use strict';
+
+var $ = require('./util/uri-helpers');
+
+$.findByRef = require('./util/find-reference');
+$.resolveSchema = require('./util/resolve-schema');
+$.normalizeSchema = require('./util/normalize-schema');
+
+var instance = module.exports = function() {
+  function $ref(fakeroot, schema, refs, ex) {
+    if (typeof fakeroot === 'object') {
+      ex = refs;
+      refs = schema;
+      schema = fakeroot;
+      fakeroot = undefined;
+    }
+
+    if (typeof schema !== 'object') {
+      throw new Error('schema must be an object');
+    }
+
+    if (typeof refs === 'object' && refs !== null) {
+      var aux = refs;
+
+      refs = [];
+
+      for (var k in aux) {
+        aux[k].id = aux[k].id || k;
+        refs.push(aux[k]);
+      }
+    }
+
+    if (typeof refs !== 'undefined' && !Array.isArray(refs)) {
+      ex = !!refs;
+      refs = [];
+    }
+
+    function push(ref) {
+      if (typeof ref.id === 'string') {
+        var id = $.resolveURL(fakeroot, ref.id).replace(/\/#?$/, '');
+
+        if (id.indexOf('#') > -1) {
+          var parts = id.split('#');
+
+          if (parts[1].charAt() === '/') {
+            id = parts[0];
+          } else {
+            id = parts[1] || parts[0];
+          }
+        }
+
+        if (!$ref.refs[id]) {
+          $ref.refs[id] = ref;
+        }
+      }
+    }
+
+    (refs || []).concat([schema]).forEach(function(ref) {
+      schema = $.normalizeSchema(fakeroot, ref, push);
+      push(schema);
+    });
+
+    return $.resolveSchema(schema, $ref.refs, ex);
+  }
+
+  $ref.refs = {};
+  $ref.util = $;
+
+  return $ref;
+};
+
+instance.util = $;
+
+},{"./util/find-reference":23,"./util/normalize-schema":24,"./util/resolve-schema":25,"./util/uri-helpers":26}],22:[function(require,module,exports){
+'use strict';
+
+var clone = module.exports = function(obj, seen) {
+  seen = seen || [];
+
+  if (seen.indexOf(obj) > -1) {
+    throw new Error('unable dereference circular structures');
+  }
+
+  if (!obj || typeof obj !== 'object') {
+    return obj;
+  }
+
+  seen = seen.concat([obj]);
+
+  var target = Array.isArray(obj) ? [] : {};
+
+  function copy(key, value) {
+    target[key] = clone(value, seen);
+  }
+
+  if (Array.isArray(target)) {
+    obj.forEach(function(value, key) {
+      copy(key, value);
+    });
+  } else if (Object.prototype.toString.call(obj) === '[object Object]') {
+    Object.keys(obj).forEach(function(key) {
+      copy(key, obj[key]);
+    });
+  }
+
+  return target;
+};
+
+},{}],23:[function(require,module,exports){
+'use strict';
+
+var $ = require('./uri-helpers');
+
+function get(obj, path) {
+  var hash = path.split('#')[1];
+
+  var parts = hash.split('/').slice(1);
+
+  while (parts.length) {
+    var key = decodeURIComponent(parts.shift()).replace(/~1/g, '/').replace(/~0/g, '~');
+
+    if (typeof obj[key] === 'undefined') {
+      throw new Error('JSON pointer not found: ' + path);
+    }
+
+    obj = obj[key];
+  }
+
+  return obj;
+}
+
+var find = module.exports = function(id, refs) {
+  var target = refs[id] || refs[id.split('#')[1]] || refs[$.getDocumentURI(id)];
+
+  if (target) {
+    target = id.indexOf('#/') > -1 ? get(target, id) : target;
+  } else {
+    for (var key in refs) {
+      if ($.resolveURL(refs[key].id, id) === refs[key].id) {
+        target = refs[key];
+        break;
+      }
+    }
+  }
+
+  if (!target) {
+    throw new Error('Reference not found: ' + id);
+  }
+
+  while (target.$ref) {
+    target = find(target.$ref, refs);
+  }
+
+  return target;
+};
+
+},{"./uri-helpers":26}],24:[function(require,module,exports){
+'use strict';
+
+var $ = require('./uri-helpers');
+
+var cloneObj = require('./clone-obj');
+
+var SCHEMA_URI = [
+  'http://json-schema.org/schema#',
+  'http://json-schema.org/draft-04/schema#'
+];
+
+function expand(obj, parent, callback) {
+  if (obj) {
+    var id = typeof obj.id === 'string' ? obj.id : '#';
+
+    if (!$.isURL(id)) {
+      id = $.resolveURL(parent === id ? null : parent, id);
+    }
+
+    if (typeof obj.$ref === 'string' && !$.isURL(obj.$ref)) {
+      obj.$ref = $.resolveURL(id, obj.$ref);
+    }
+
+    if (typeof obj.id === 'string') {
+      obj.id = parent = id;
+    }
+  }
+
+  for (var key in obj) {
+    var value = obj[key];
+
+    if (typeof value === 'object' && !(key === 'enum' || key === 'required')) {
+      expand(value, parent, callback);
+    }
+  }
+
+  if (typeof callback === 'function') {
+    callback(obj);
+  }
+}
+
+module.exports = function(fakeroot, schema, push) {
+  if (typeof fakeroot === 'object') {
+    push = schema;
+    schema = fakeroot;
+    fakeroot = null;
+  }
+
+  var base = fakeroot || '',
+      copy = cloneObj(schema);
+
+  if (copy.$schema && SCHEMA_URI.indexOf(copy.$schema) === -1) {
+    throw new Error('Unsupported schema version (v4 only)');
+  }
+
+  base = $.resolveURL(copy.$schema || SCHEMA_URI[0], base);
+
+  expand(copy, $.resolveURL(copy.id || '#', base), push);
+
+  copy.id = copy.id || base;
+
+  return copy;
+};
+
+},{"./clone-obj":22,"./uri-helpers":26}],25:[function(require,module,exports){
+'use strict';
+
+var $ = require('./uri-helpers');
+
+var find = require('./find-reference');
+
+var deepExtend = require('deep-extend');
+
+function isKey(prop) {
+  return prop === 'enum' || prop === 'required' || prop === 'definitions';
+}
+
+function copy(obj, refs, parent, resolve) {
+  var target =  Array.isArray(obj) ? [] : {};
+
+  if (typeof obj.$ref === 'string') {
+    var base = $.getDocumentURI(obj.$ref);
+
+    if (parent !== base || (resolve && obj.$ref.indexOf('#/') > -1)) {
+      var fixed = find(obj.$ref, refs);
+
+      deepExtend(obj, fixed);
+
+      delete obj.$ref;
+      delete obj.id;
+    }
+  }
+
+  for (var prop in obj) {
+    if (typeof obj[prop] === 'object' && !isKey(prop)) {
+      target[prop] = copy(obj[prop], refs, parent, resolve);
+    } else {
+      target[prop] = obj[prop];
+    }
+  }
+
+  return target;
+}
+
+module.exports = function(obj, refs, resolve) {
+  var fixedId = $.resolveURL(obj.$schema, obj.id),
+      parent = $.getDocumentURI(fixedId);
+
+  return copy(obj, refs, parent, resolve);
+};
+
+},{"./find-reference":23,"./uri-helpers":26,"deep-extend":27}],26:[function(require,module,exports){
+'use strict';
+
+// https://gist.github.com/pjt33/efb2f1134bab986113fd
+
+function URLUtils(url, baseURL) {
+  // remove leading ./
+  url = url.replace(/^\.\//, '');
+
+  var m = String(url).replace(/^\s+|\s+$/g, '').match(/^([^:\/?#]+:)?(?:\/\/(?:([^:@]*)(?::([^:@]*))?@)?(([^:\/?#]*)(?::(\d*))?))?([^?#]*)(\?[^#]*)?(#[\s\S]*)?/);
+  if (!m) {
+    throw new RangeError();
+  }
+  var href = m[0] || '';
+  var protocol = m[1] || '';
+  var username = m[2] || '';
+  var password = m[3] || '';
+  var host = m[4] || '';
+  var hostname = m[5] || '';
+  var port = m[6] || '';
+  var pathname = m[7] || '';
+  var search = m[8] || '';
+  var hash = m[9] || '';
+  if (baseURL !== undefined) {
+    var base = new URLUtils(baseURL);
+    var flag = protocol === '' && host === '' && username === '';
+    if (flag && pathname === '' && search === '') {
+      search = base.search;
+    }
+    if (flag && pathname.charAt(0) !== '/') {
+      pathname = (pathname !== '' ? (base.pathname.slice(0, base.pathname.lastIndexOf('/') + 1) + pathname) : base.pathname);
+    }
+    // dot segments removal
+    var output = [];
+
+    pathname.replace(/\/?[^\/]+/g, function(p) {
+      if (p === '/..') {
+        output.pop();
+      } else {
+        output.push(p);
+      }
+    });
+
+    pathname = output.join('') || '/';
+
+    if (flag) {
+      port = base.port;
+      hostname = base.hostname;
+      host = base.host;
+      password = base.password;
+      username = base.username;
+    }
+    if (protocol === '') {
+      protocol = base.protocol;
+    }
+    href = protocol + (host !== '' ? '//' : '') + (username !== '' ? username + (password !== '' ? ':' + password : '') + '@' : '') + host + pathname + search + hash;
+  }
+  this.href = href;
+  this.origin = protocol + (host !== '' ? '//' + host : '');
+  this.protocol = protocol;
+  this.username = username;
+  this.password = password;
+  this.host = host;
+  this.hostname = hostname;
+  this.port = port;
+  this.pathname = pathname;
+  this.search = search;
+  this.hash = hash;
+}
+
+function isURL(path) {
+  if (typeof path === 'string' && /^\w+:\/\//.test(path)) {
+    return true;
+  }
+}
+
+function parseURI(href, base) {
+  return new URLUtils(href, base);
+}
+
+function resolveURL(base, href) {
+  base = base || 'http://json-schema.org/schema#';
+
+  href = parseURI(href, base);
+  base = parseURI(base);
+
+  if (base.hash && !href.hash) {
+    return href.href + base.hash;
+  }
+
+  return href.href;
+}
+
+function getDocumentURI(uri) {
+  return typeof uri === 'string' && uri.split('#')[0];
+}
+
+module.exports = {
+  isURL: isURL,
+  parseURI: parseURI,
+  resolveURL: resolveURL,
+  getDocumentURI: getDocumentURI
+};
+
+},{}],27:[function(require,module,exports){
+/*!
+ * @description Recursive object extending
+ * @author Viacheslav Lotsmanov <lotsmanov89@gmail.com>
+ * @license MIT
+ *
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2013-2015 Viacheslav Lotsmanov
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+'use strict';
+
+function isSpecificValue(val) {
+	return (
+		val instanceof Buffer
+		|| val instanceof Date
+		|| val instanceof RegExp
+	) ? true : false;
+}
+
+function cloneSpecificValue(val) {
+	if (val instanceof Buffer) {
+		var x = new Buffer(val.length);
+		val.copy(x);
+		return x;
+	} else if (val instanceof Date) {
+		return new Date(val.getTime());
+	} else if (val instanceof RegExp) {
+		return new RegExp(val);
+	} else {
+		throw new Error('Unexpected situation');
+	}
+}
+
+/**
+ * Recursive cloning array.
+ */
+function deepCloneArray(arr) {
+	var clone = [];
+	arr.forEach(function (item, index) {
+		if (typeof item === 'object' && item !== null) {
+			if (Array.isArray(item)) {
+				clone[index] = deepCloneArray(item);
+			} else if (isSpecificValue(item)) {
+				clone[index] = cloneSpecificValue(item);
+			} else {
+				clone[index] = deepExtend({}, item);
+			}
+		} else {
+			clone[index] = item;
+		}
+	});
+	return clone;
+}
+
+/**
+ * Extening object that entered in first argument.
+ *
+ * Returns extended object or false if have no target object or incorrect type.
+ *
+ * If you wish to clone source object (without modify it), just use empty new
+ * object as first argument, like this:
+ *   deepExtend({}, yourObj_1, [yourObj_N]);
+ */
+var deepExtend = module.exports = function (/*obj_1, [obj_2], [obj_N]*/) {
+	if (arguments.length < 1 || typeof arguments[0] !== 'object') {
+		return false;
+	}
+
+	if (arguments.length < 2) {
+		return arguments[0];
+	}
+
+	var target = arguments[0];
+
+	// convert arguments to array and cut off target object
+	var args = Array.prototype.slice.call(arguments, 1);
+
+	var val, src, clone;
+
+	args.forEach(function (obj) {
+		// skip argument if it is array or isn't object
+		if (typeof obj !== 'object' || Array.isArray(obj)) {
+			return;
+		}
+
+		Object.keys(obj).forEach(function (key) {
+			src = target[key]; // source value
+			val = obj[key]; // new value
+
+			// recursion prevention
+			if (val === target) {
+				return;
+
+			/**
+			 * if new value isn't object then just overwrite by new value
+			 * instead of extending.
+			 */
+			} else if (typeof val !== 'object' || val === null) {
+				target[key] = val;
+				return;
+
+			// just clone arrays (and recursive clone objects inside)
+			} else if (Array.isArray(val)) {
+				target[key] = deepCloneArray(val);
+				return;
+
+			// custom cloning and overwrite for specific objects
+			} else if (isSpecificValue(val)) {
+				target[key] = cloneSpecificValue(val);
+				return;
+
+			// overwrite by new value if source isn't object or array
+			} else if (typeof src !== 'object' || src === null || Array.isArray(src)) {
+				target[key] = deepExtend({}, val);
+				return;
+
+			// source value and new value is objects both, extending...
+			} else {
+				target[key] = deepExtend(src, val);
+				return;
+			}
+		});
+	});
+
+	return target;
+}
 
 },{}],28:[function(require,module,exports){
 // since we are requiring the top level of faker, load all locales by default
@@ -47737,4 +48025,4 @@ $(document).ready(function () {
     });
 });
 
-},{"../schema/array/enum.json":952,"../schema/array/fixed.json":953,"../schema/array/n-times.json":954,"../schema/boolean.json":955,"../schema/chance/chance.json":956,"../schema/faker/faker.json":957,"../schema/integer.json":958,"../schema/reference.json":959,"json-schema-faker":8}]},{},[960]);
+},{"../schema/array/enum.json":952,"../schema/array/fixed.json":953,"../schema/array/n-times.json":954,"../schema/boolean.json":955,"../schema/chance/chance.json":956,"../schema/faker/faker.json":957,"../schema/integer.json":958,"../schema/reference.json":959,"json-schema-faker":1}]},{},[960]);
